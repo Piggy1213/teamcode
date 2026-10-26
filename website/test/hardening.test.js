@@ -241,3 +241,58 @@ test('acknowledging a sync conflict keeps the unapplied edit until it is pruned 
   assert.equal(W.state.conflicts[r.conflict], undefined, 'pruned after a week');
   c.close();
 });
+
+test('a project whose file storage is full can still revert, resolve, review, and free space by deleting', () => {
+  const c = new Coordinator({ dataDir: tmp(), limits: { maxBytes: 960 * 1024 } }); // three 300 KB versions put it over 90%
+  const W = c.ensureWorkspace('fullc-ws', { name: 'FC' });
+  const big = (n, fill) => Buffer.alloc(n, fill).toString('base64');
+  W.call('filePut', { path: 'a.bin', baseVersion: 0, contentB64: big(300 * 1024, 1) }, user);
+  W.call('filePut', { path: 'a.bin', baseVersion: 1, contentB64: big(300 * 1024, 2) }, user);
+  W.call('filePut', { path: 'b.bin', baseVersion: 0, contentB64: big(300 * 1024, 3) }, user);
+  assert.throws(() => W.call('filePut', { path: 'c.bin', baseVersion: 0, contentB64: big(300 * 1024, 4) }, user), /storage limit/, 'new content is refused');
+  for (let i = 0; i < 40; i++) W.call('userJoined', { user: { id: 'u1', name: 'Uma' } }, user); // routine activity keeps adding records
+  W.call('fileRevert', { path: 'a.bin', version: 1 }, user); // reuses stored content: allowed
+  assert.equal(W.state.files['a.bin'].hash, W.state.files['a.bin'].history[0].hash);
+  const t = W.call('createTask', { title: 'Review me' }, user);
+  W.call('requestReview', { taskId: t.id, summary: 'x' }, user);
+  // Deleting a file on a nearly full project frees its old versions but keeps the last one to restore.
+  W.call('filePut', { path: 'a.bin', baseVersion: W.state.files['a.bin'].version, deleted: true }, user);
+  W.saveNow();
+  assert.ok(W.state.files['a.bin'].history.some((h) => h.hash), 'still restorable');
+  W.call('filePut', { path: 'c.bin', baseVersion: 0, contentB64: big(300 * 1024, 4) }, user); // there is room again
+  c.close();
+});
+
+test('when sync arrives before the hook, the version is credited to the agent and Revert does not skip it', () => {
+  const c = new Coordinator({ dataDir: tmp() });
+  const W = c.ensureWorkspace('credit-ws', { name: 'C' });
+  W.call('filePut', { path: 'a.txt', baseVersion: 0, contentB64: Buffer.from('original').toString('base64') }, user);
+  const t = W.call('createTask', { title: 'T', mode: 'shared' }, user);
+  W.call('registerAgent', { agentId: 'agt_n', name: 'Nova', taskId: t.id }, user);
+  W.call('startTask', { taskId: t.id, agentId: 'agt_n' }, user);
+  W.call('filePut', { path: 'a.txt', baseVersion: 1, contentB64: Buffer.from('nova').toString('base64') }, user);
+  W.call('fileEdited', { agentId: 'agt_n', path: 'a.txt', hash: require('crypto').createHash('sha256').update('nova').digest('hex') }, user);
+  const [ch] = W.call('taskChanges', { taskId: t.id }, user);
+  assert.equal(ch.beforeVersion, 1);
+  assert.deepEqual(ch.changedByOthersSince, [], 'not mistaken for someone else\'s edit');
+  assert.equal(W.state.files['a.txt'].history.at(-1).by.name, 'Nova');
+  c.close();
+});
+
+test('a laptop back from sleep resumes its task if nobody took it; claiming another task releases the first', () => {
+  const c = new Coordinator({ dataDir: tmp() });
+  const W = c.ensureWorkspace('wake-ws', { name: 'W' });
+  const t1 = W.call('createTask', { title: 'One' }, user);
+  const t2 = W.call('createTask', { title: 'Two' }, user);
+  W.call('registerAgent', { agentId: 'agt_w', name: 'W', taskId: t1.id }, user);
+  W.call('startTask', { taskId: t1.id, agentId: 'agt_w' }, user);
+  W.state.agents.agt_w.lastSeen = Date.now() - 30 * 60 * 1000;
+  W.sweep(); W.sweep();
+  assert.equal(W.state.tasks[t1.id].status, 'ready');
+  W.call('heartbeat', { agentId: 'agt_w' }, user);
+  assert.equal(W.state.tasks[t1.id].status, 'running', 'resumed');
+  W.call('startTask', { taskId: t2.id, agentId: 'agt_w' }, user);
+  assert.equal(W.state.tasks[t1.id].status, 'ready', 'the first task went back to the queue');
+  assert.equal(W.state.agents.agt_w.taskId, t2.id);
+  c.close();
+});

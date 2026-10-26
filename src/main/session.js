@@ -186,7 +186,7 @@ class ProjectSession {
     const cwd = t?.worktree && fs.existsSync(t.worktree) ? t.worktree : this.project.root;
     this.send('tc:toast', { kind: 'info', text: `Running "${cmd}"…` });
     const r = await git.runCommand(cmd, cwd);
-    await this.call('testCompleted', { taskId, passed: r.passed, output: r.output, command: cmd, durationMs: r.durationMs });
+    await this.call('testCompleted', { taskId, passed: r.passed, output: String(r.output || '').slice(-8000), command: cmd, durationMs: r.durationMs });
     return r;
   }
 
@@ -259,16 +259,17 @@ class ProjectSession {
     }
     if (t.mode === 'isolated') throw new Error('Nothing to revert: this branch was never merged');
     const changes = await this.call('taskChanges', { taskId });
-    const skipped = [];
+    const skipped = [], failed = [];
     for (const c of changes) {
       if (c.changedByOthersSince.length) { skipped.push({ path: c.path, reason: `also changed by ${[...new Set(c.changedByOthersSince)].join(', ')}` }); continue; }
       try {
         if (c.beforeVersion) await this.call('fileRevert', { path: c.path, version: c.beforeVersion });
         else fs.rmSync(path.join(this.project.root, c.path), { force: true }); // file was created by the task; the watcher syncs the delete
-      } catch (e) { skipped.push({ path: c.path, reason: e.message }); } // keep going: one missing version mustn't stop the rest
+      } catch (e) { failed.push({ path: c.path, reason: e.message }); } // keep going: one file mustn't stop the rest
     }
-    await this.call('markReverted', { taskId });
-    return { ok: true, skipped };
+    // Only a complete revert (apart from files others have since changed) is recorded; otherwise it can be retried.
+    if (!failed.length) await this.call('markReverted', { taskId });
+    return { ok: !failed.length, skipped, failed };
   }
 
   async checkpoint() {

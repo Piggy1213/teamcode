@@ -990,12 +990,18 @@ A['rv-reject'] = async (d) => {
 A['rv-reject-go'] = async (d) => {
   const note = $('#rj-note').value, discard = $('#rj-discard').checked;
   const r = await run(() => api('review:reject', { taskId: d.id, note, discard }), 'Changes rejected');
-  if (r) { closeModal(); if (r.skipped?.length) toast(`Kept ${r.skipped.length} file(s) that others changed since`, 'warn', 8000); loadDiff(d.id, true); }
+  if (r) {
+    closeModal();
+    if (r.failed?.length) toast(`Couldn't revert ${r.failed.map((f) => `${f.path} (${f.reason})`).join(', ')}`, 'error', 12000);
+    if (r.skipped?.length) toast(`Kept ${r.skipped.map((s) => `${s.path} (${s.reason})`).join(', ')}`, 'warn', 8000);
+    loadDiff(d.id, true);
+  }
 };
 A['rv-revert'] = async (d) => {
   if (!confirm('Revert this task\'s changes? A revert is recorded; nothing is deleted from history.')) return;
   const r = await run(() => api('review:revert', { taskId: d.id }), 'Changes reverted');
-  if (r?.skipped?.length) toast(`Skipped ${r.skipped.length} file(s) changed by others since: ${r.skipped.map((s) => s.path).join(', ')}`, 'warn', 9000);
+  if (r?.failed?.length) toast(`Couldn't revert ${r.failed.map((f) => `${f.path} (${f.reason})`).join(', ')}. Nothing was marked reverted; try again.`, 'error', 12000);
+  if (r?.skipped?.length) toast(`Kept ${r.skipped.map((s) => `${s.path} (${s.reason})`).join(', ')}`, 'warn', 9000);
 };
 A['rv-agent-fix'] = (d) => run(() => api('agent:resolveConflicts', { taskId: d.id }), 'Agent is resolving the conflicts');
 

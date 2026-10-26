@@ -359,7 +359,7 @@ class AgentManager extends EventEmitter {
     if (m.worktree) {
       const head = await git.commitAll(m.worktree, `${task?.title || 'TeamCode task'}\n\n${summary}\n\nTeamCode task ${m.taskId} by agent ${m.name}`, { name: `${m.name} (TeamCode agent)`, email: 'agent@teamcode.local' });
       if (!head && !(await git.changedFiles(this.root, m.baseCommit, m.branch)).length) return this.log(agentId, 'system', 'No file changes to review');
-      const files = (await git.changedFiles(this.root, m.baseCommit, m.branch)).map((f) => f.path);
+      const files = (await git.changedFiles(this.root, m.baseCommit, m.branch)).map((f) => f.path).slice(0, 2000);
       const stats = await git.diffStat(this.root, m.baseCommit, m.branch);
       await this.conn.call('requestReview', { agentId, taskId: m.taskId, summary, files, headCommit: head, stats });
     } else {
@@ -439,7 +439,7 @@ class AgentManager extends EventEmitter {
     task = await freshTask();
     if (task && ['done', 'cancelled'].includes(task.status)) throw new Error('This task finished before it could be handed over.');
     const theirs = task?.assignee && task.assignee !== agentId && this.getState()?.agents?.[task.assignee];
-    if (theirs && ['starting', 'working', 'idle', 'waiting', 'blocked'].includes(theirs.status)) throw new Error(`${theirs.name} is working on this task now.`);
+    if (theirs && ['starting', 'working', 'idle', 'waiting', 'blocked', 'stale'].includes(theirs.status)) throw new Error(`${theirs.name} is working on this task now.`);
     // A failed or stopped agent takes its task back first, the same way a follow-up message does.
     if (!task || !['running', 'blocked'].includes(task.status)) {
       await this.conn.call('registerAgent', { agentId, name: m.name, client: 'Claude Code', taskId: m.taskId, userId: this.user.id, mode: m.mode, branch: m.branch, cwd: m.cwd });

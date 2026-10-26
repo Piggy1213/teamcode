@@ -38,14 +38,9 @@ const POISON = new Set(['__proto__', 'constructor', 'prototype']);
 // Operations that add records to a workspace. On a hosted server they stop once the project's records
 // (state + event log) use a quarter of its storage; everything else, including finishing work, keeps working.
 const GROWTH_OPS = new Set(['createTask', 'createTasks', 'chat', 'publishUpdate', 'recordDecision', 'publishContract', 'requestCoordination', 'reportBlocker']);
-// Still allowed when a hosted project is completely full: reading, finishing and reviewing work, cleanup.
-const WHEN_FULL = new Set(['snapshot', 'fileIndex', 'fileGet', 'fileHistory', 'events', 'getContext', 'teamStatus', 'getAgent', 'getUpdates', 'pullDigest',
-  'heartbeat', 'checkFiles', 'findOverlaps', 'getContract', 'taskChanges', 'conflictData', 'userJoined', 'userLeft', 'preEdit', 'agentRead',
-  'agentExited', 'releaseFiles', 'setAgentStatus', 'completeTask', 'failTask', 'cancelTask', 'deleteTask', 'reviewDecision', 'markMerged', 'markReverted',
-  'resolveConflictRecord', 'testCompleted']);
-const MAX_STRING = 64 * 1024; // any single text field, other than file or contract content
-const MAX_LIST = 2000; // any single list
-const FREE_TEXT_OK = new Set(['contentB64', 'content']);
+const MAX_STRING = 64 * 1024; // any single text field, other than file/contract content and test output
+const MAX_LIST = 5000; // any single list
+const FREE_TEXT_OK = new Set(['contentB64', 'content', 'output']); // bounded elsewhere (file cap, args cap, output kept as last 8000 chars)
 const PRUNE_AFTER = 7 * 24 * 3600 * 1000; // finished agents and resolved conflicts are forgotten after a week
 
 const rid = (p) => `${p}_${crypto.randomBytes(5).toString('hex')}`;
@@ -150,6 +145,21 @@ class Workspace extends EventEmitter {
       t.contractsUsed = dict(t.contractsUsed);
       if (t.changes) { t.changes = dict(t.changes); t.changeActors = dict(t.changeActors); }
     }
+  }
+
+  // Space recovery for a nearly full hosted project: when a file is deleted, drop its older versions except
+  // the last content (so the file can be restored) and any version an open task needs to Revert to.
+  _freeHistory(p, f) {
+    const keep = new Set();
+    const lastContent = [...f.history].reverse().find((h) => h.hash);
+    if (lastContent) keep.add(lastContent.version);
+    for (const t of Object.values(this.state.tasks)) {
+      const c = t.changes?.[p];
+      if (c && t.status !== 'cancelled' && t.integration?.state !== 'reverted') keep.add(c.beforeVersion);
+    }
+    const last = f.history[f.history.length - 1];
+    for (const h of f.history) if (h !== last && !keep.has(h.version)) this._ref(h.hash, -1);
+    f.history = f.history.filter((h) => h === last || keep.has(h.version));
   }
 
   // Tasks from before change records existed: build their record from the event log, once, at load.
@@ -407,6 +417,16 @@ class Workspace extends EventEmitter {
       const from = a.status;
       a.status = a.prevStatus || 'working';
       this.emitEvent('agent.status_changed', a, { task: a.taskId, data: { from, to: a.status, detail: 'reconnected' } });
+      this._resumeTask(a);
+    }
+  }
+
+  // An agent back from sleep whose task went back to the queue, untouched by anyone else: it carries on.
+  _resumeTask(a) {
+    const t = a.taskId && this.state.tasks[a.taskId];
+    if (t && t.status === 'ready' && t.assignee === a.id) {
+      t.status = 'running'; t.updatedAt = Date.now();
+      this.emitEvent('task.updated', a, { task: t.id, data: { changes: { status: 'running' }, reason: `${a.name} reconnected` } });
     }
   }
 
@@ -428,11 +448,11 @@ class Workspace extends EventEmitter {
     if (poisoned(args) || poisoned(ctx.user)) throw new CoordError('Invalid request', 'invalid');
     if (!CONTENT_OPS.has(op) && JSON.stringify(args || {}).length > MAX_ARGS_BYTES) throw new CoordError('Request too large', 'too_large');
     if (oversized(args)) throw new CoordError('Request too large', 'too_large');
-    // A full hosted project can still finish, review and clean up its work, but nothing grows it further.
-    if (this.limits.maxBytes && this._usedBytes() > this.limits.maxBytes && !WHEN_FULL.has(op) && !(op === 'filePut' && args.deleted)) {
-      throw new CoordError(`This project has reached its storage limit (${fmtBytes(this.limits.maxBytes)}) on this server. Finish or delete tasks, or delete the project and start a new one.`, 'too_large');
-    }
-    if (this.limits.maxBytes && GROWTH_OPS.has(op) && this.metaBytes > this.limits.maxBytes / 4) {
+    // Two budgets on hosted servers. File content is checked when new bytes are stored (_putBlob), so reverts,
+    // conflict resolutions and deletes always work. Records (tasks, chat, notes...) stop growing at a quarter
+    // of the budget; finishing, reviewing, reopening and cleaning up are never refused.
+    const addsRecords = GROWTH_OPS.has(op) || op === 'integrationChecked' || (op === 'registerAgent' && !this.state.agents[args.agentId]);
+    if (this.limits.maxBytes && addsRecords && this.metaBytes > this.limits.maxBytes / 4) {
       throw new CoordError(`This project has reached its storage limit (${fmtBytes(this.limits.maxBytes)}) for tasks and history on this server. Delete finished tasks or old files to make room.`, 'too_large');
     }
     if (op !== 'registerAgent') {
@@ -486,7 +506,7 @@ class Workspace extends EventEmitter {
       if (taskId && taskId !== a.taskId) { try { this._assign(a, taskId); } catch (e) { if (e.code !== 'busy') throw e; } }
       const held = a.taskId && this.state.tasks[a.taskId];
       if (held && held.assignee && held.assignee !== a.id) a.taskId = null;
-      if (wasInactive) this._setAgentStatus(a, 'working', 'reconnected');
+      if (wasInactive) { this._setAgentStatus(a, 'working', 'reconnected'); this._resumeTask(a); }
       const missed = this._relevantSince(a, a.cursor);
       return { agent: this._agentView(a), reconnected: true, missedCount: missed.length, missed: this._digestText(missed) };
     }
@@ -526,6 +546,12 @@ class Workspace extends EventEmitter {
     // The previous assignee no longer has this task (so a woken agent can't act on it).
     const prev = t.assignee && t.assignee !== a.id && this.state.agents[t.assignee];
     if (prev && prev.taskId === t.id) prev.taskId = null;
+    // An agent moving to a new task gives its old one back to the queue.
+    const old = a.taskId && a.taskId !== taskId && this.state.tasks[a.taskId];
+    if (old && ['running', 'blocked'].includes(old.status) && old.assignee === a.id) {
+      old.status = 'ready'; old.updatedAt = Date.now();
+      this.emitEvent('task.updated', a, { task: old.id, data: { changes: { status: 'ready' }, reason: `${a.name} moved to another task` } });
+    }
     a.taskId = taskId;
     if (t.assignee !== a.id) {
       t.assignee = a.id; t.assigneeName = a.name; t.updatedAt = Date.now();
@@ -709,8 +735,10 @@ class Workspace extends EventEmitter {
 
   op_startTask({ taskId, agentId, branch, worktree, baseCommit, force }, ctx) {
     const t = this._task(taskId);
-    // Running with no live agent (it crashed or quit without releasing the task) can be picked up.
-    if (t.status === 'running' && this._liveOwner(t)?.id === agentId) throw new CoordError('Task is already running');
+    // Already running under this same agent (e.g. it just reconnected and resumed it): nothing to do.
+    // Running with no live agent (it crashed or quit without releasing the task) can be picked up below.
+    if (t.status === 'running' && agentId && this._liveOwner(t)?.id === agentId) return t;
+    if (t.status === 'running' && !agentId) throw new CoordError('Task is already running');
     // A live agent keeps its task, whatever the caller asks for.
     const owner = this._liveOwner(t);
     if (owner && owner.id !== agentId) throw new CoordError(`${owner.name} is working on this task.`, 'busy');
@@ -965,7 +993,13 @@ class Workspace extends EventEmitter {
     if (a.branch === 'main' || !a.branch) {
       this.claims.set(p, { agentId: a.id, hash, at: Date.now() });
       const f = this.state.files[p];
-      if (f && f.hash === hash) { version = f.version; f.by = { kind: 'agent', id: a.id, name: a.name }; }
+      if (f && f.hash === hash) {
+        // Sync uploaded the agent's edit first: credit that version to the agent, in history too.
+        version = f.version;
+        f.by = { kind: 'agent', id: a.id, name: a.name };
+        const h = f.history.find((x) => x.version === f.version);
+        if (h) h.by = f.by;
+      }
     }
     return this.emitEvent(deleted ? 'file.deleted' : 'file.changed', a, { task: a.taskId, files: [p], branch: a.branch || 'main', version, data: { hash, summary: summary || '' } });
   }
@@ -1319,6 +1353,7 @@ class Workspace extends EventEmitter {
     Object.assign(f, { hash, deleted: !!deleted, size: deleted ? 0 : buf.length, binary: deleted ? false : isBinary(buf), by: { kind: actor.kind, id: actor.id, name: actor.name }, at: Date.now() });
     f.history.push({ version: f.version, hash, deleted: !!deleted, by: f.by, at: f.at });
     this._ref(hash, 1);
+    if (deleted && this.limits.maxBytes && this._usedBytes() > this.limits.maxBytes * 0.9) this._freeHistory(p, f);
     if (f.history.length > MAX_HISTORY) {
       for (const old of f.history.slice(0, f.history.length - MAX_HISTORY)) this._ref(old.hash, -1);
       f.history = f.history.slice(-MAX_HISTORY);
