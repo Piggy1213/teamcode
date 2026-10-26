@@ -1,0 +1,89 @@
+{
+  "name": "teamcode",
+  "productName": "TeamCode",
+  "version": "1.0.0",
+  "description": "Code together with your team — everyone's Claude Code sees everyone's changes in real time.",
+  "main": "src/main/main.js",
+  "author": "TeamCode",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "server": "node server/standalone.js",
+    "test": "node --test --test-concurrency=1 test/acceptance.test.js",
+    "smoke": "node scripts/smoke.js",
+    "icon": "electron scripts/make-icon.js",
+    "dist": "electron-builder",
+    "dist:win": "electron-builder --win",
+    "dist:mac": "electron-builder --mac"
+  },
+  "dependencies": {
+    "chokidar": "^3.6.0",
+    "ignore": "^5.3.2",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "electron": "^33.2.1",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.teamcode.app",
+    "productName": "TeamCode",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "src/**/*",
+      "server/**/*",
+      "package.json",
+      "!src/main/smoke.js"
+    ],
+    "asarUnpack": [
+      "src/agent/**",
+      "server/invite.js"
+    ],
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "icon": "build/icon.png",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
+      ]
+    },
+    "win": {
+      "icon": "build/icon.png",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "linux": {
+      "icon": "build/icon.png",
+      "target": [
+        "AppImage"
+      ],
+      "category": "Development"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true
+    }
+  }
+}
