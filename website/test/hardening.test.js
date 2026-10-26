@@ -82,13 +82,14 @@ test('old file versions are deleted once they leave history, so editing never fi
     const buf = Buffer.alloc(50 * 1024, v % 256);
     W.call('filePut', { path: 'lock.json', baseVersion: v, contentB64: buf.toString('base64') }, user);
   }
+  W.saveNow(); // old versions are deleted once the state that no longer needs them is saved
   const blobs = fs.readdirSync(path.join(dir, 'gc-ws', 'blobs')).length;
   assert.ok(blobs <= 31, `kept ${blobs} versions`);
   assert.equal(W.state.files['lock.json'].version, 120);
   c.close();
 });
 
-test('event trimming keeps the file events of tasks that are still open', () => {
+test('a task keeps its record of changed files after the event log is trimmed', () => {
   const c = new Coordinator({ dataDir: tmp(), limits: { maxEvents: 200 } });
   const W = c.ensureWorkspace('trim-ws', { name: 'T' });
   const t = W.call('createTask', { title: 'Open task', mode: 'shared' }, user);
@@ -112,10 +113,47 @@ test('a live agent keeps its running or blocked task', () => {
   W.call('reportBlocker', { agentId: 'agt_live', description: 'need API' }, user);
   assert.equal(W.state.tasks[t.id].status, 'blocked');
   assert.throws(() => W.call('reopenTask', { taskId: t.id }, user), /can't be reopened/);
-  assert.throws(() => W.call('startTask', { taskId: t.id, agentId: 'agt_other' }, user), /blocked/);
-  W.call('reopenTask', { taskId: t.id, force: true }, user); // the owner's own app releasing it
-  assert.throws(() => W.call('startTask', { taskId: t.id, agentId: 'agt_other' }, user), /still working on this task/);
+  assert.throws(() => W.call('startTask', { taskId: t.id, agentId: 'agt_other' }, user), /working on this task/);
+  assert.throws(() => W.call('reopenTask', { taskId: t.id, force: true }, user), /can't be reopened/, 'force does not override a live owner');
+  assert.throws(() => W.call('startTask', { taskId: t.id, agentId: 'agt_other', force: true }, user), /working on this task/);
+  assert.throws(() => W.call('registerAgent', { agentId: 'agt_new', name: 'New', taskId: t.id }, user), /working on this task/, 'registering cannot take it either');
+  // The owner itself can carry on with its own blocked task.
+  assert.equal(W.call('startTask', { taskId: t.id, agentId: 'agt_live' }, user).status, 'running');
   W.call('agentExited', { agentId: 'agt_live', outcome: 'stopped' }, user);
-  assert.equal(W.call('startTask', { taskId: t.id, agentId: 'agt_other' }, user).status, 'running');
+  assert.equal(W.call('startTask', { taskId: t.id, agentId: 'agt_other' }, user).status, 'running', 'free once the owner is gone');
+  c.close();
+});
+
+test('an orphaned blocked task can be recovered once its agent is gone', () => {
+  const c = new Coordinator({ dataDir: tmp() });
+  const W = c.ensureWorkspace('orphan-ws', { name: 'O' });
+  const t = W.call('createTask', { title: 'Orphan' }, user);
+  W.call('registerAgent', { agentId: 'agt_dead', name: 'Dead', taskId: t.id }, user);
+  W.call('startTask', { taskId: t.id, agentId: 'agt_dead' }, user);
+  W.call('reportBlocker', { agentId: 'agt_dead', description: 'stuck' }, user);
+  W.state.agents.agt_dead.lastSeen = Date.now() - 20 * 60 * 1000; // crashed long ago, never said goodbye
+  W.sweep(); W.sweep();
+  assert.equal(W.state.tasks[t.id].status, 'ready', 'the sweep returns it to the queue');
+  c.close();
+});
+
+test('a merged task is not silently restarted; Revert still knows its changes after the log is trimmed', () => {
+  const c = new Coordinator({ dataDir: tmp(), limits: { maxEvents: 100 } });
+  const W = c.ensureWorkspace('merged-ws', { name: 'M' });
+  W.call('filePut', { path: 'app.js', baseVersion: 0, contentB64: Buffer.from('v1').toString('base64') }, user);
+  const t = W.call('createTask', { title: 'Rewrite', mode: 'shared' }, user);
+  W.call('registerAgent', { agentId: 'agt_m', name: 'M', taskId: t.id }, user);
+  W.call('startTask', { taskId: t.id, agentId: 'agt_m' }, user);
+  W.call('fileEdited', { agentId: 'agt_m', path: 'app.js', hash: 'x' }, user);
+  W.call('filePut', { path: 'app.js', baseVersion: 1, contentB64: Buffer.from('agent rewrite').toString('base64') }, user);
+  W.call('completeTask', { agentId: 'agt_m', summary: 'done' }, user);
+  W.call('markMerged', { taskId: t.id, into: 'shared working copy' }, user);
+  for (let i = 0; i < 300; i++) W.call('chat', { text: `n${i}` }, user);
+  const ch = W.call('taskChanges', { taskId: t.id }, user);
+  assert.deepEqual(ch.map((x) => [x.path, x.beforeVersion]), [['app.js', 1]]);
+  assert.throws(() => W.call('startTask', { taskId: t.id, agentId: 'agt_m', force: true }, user), /merged/);
+  W.call('reopenTask', { taskId: t.id }, user);
+  W.call('registerAgent', { agentId: 'agt_m2', name: 'M2' }, user);
+  assert.equal(W.call('startTask', { taskId: t.id, agentId: 'agt_m2' }, user).status, 'running', 'after Reopen it can start again');
   c.close();
 });

@@ -35,14 +35,16 @@ const SETTINGS_KEYS = { testCommand: 500 }; // shared workspace settings and the
 const MAX_EVENTS = 20000; // kept in memory and on disk; older events are dropped
 // Names that would reach Object.prototype (or Object itself) when used as a key on the plain-object state.
 const POISON = new Set(['__proto__', 'constructor', 'prototype']);
-// Operations that only read (always allowed, even over the storage limit).
-const READ_OPS = new Set(['agentExited', 'releaseFiles', 'setAgentStatus', 'cancelTask', 'deleteTask', 'snapshot', 'fileIndex', 'fileGet', 'fileHistory', 'events', 'getContext', 'teamStatus', 'getAgent', 'getUpdates', 'pullDigest', 'heartbeat', 'checkFiles', 'findOverlaps', 'getContract', 'taskChanges', 'conflictData', 'userLeft', 'userJoined', 'preEdit', 'agentRead']);
+// Operations that add records to a workspace. On a hosted server they stop once the project's records
+// (state + event log) use a quarter of its storage; everything else, including finishing work, keeps working.
+const GROWTH_OPS = new Set(['createTask', 'createTasks', 'chat', 'publishUpdate', 'recordDecision', 'publishContract', 'requestCoordination', 'reportBlocker']);
 
 const rid = (p) => `${p}_${crypto.randomBytes(5).toString('hex')}`;
 const sha = (buf) => crypto.createHash('sha256').update(buf).digest('hex');
 const isBinary = (buf) => buf.subarray(0, 8000).includes(0);
 const normPath = (p) => String(p || '').replace(/\\/g, '/').replace(/^\.\//, '').replace(/^\/+/, '');
 const clip = (s, n = 160) => { s = String(s ?? '').replace(/\s+/g, ' ').trim(); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
+const fmtBytes = (n) => (n >= 1048576 ? `${Math.round(n / 1048576)} MB` : `${Math.round(n / 1024)} KB`);
 const arr = (v) => (Array.isArray(v) ? v : v == null || v === '' ? [] : [v]);
 // Keyed workspace state lives in objects without a prototype, so a key like "__proto__" or "constructor"
 // (or an array that stringifies to one) is just an ordinary key: nothing can reach Object.prototype.
@@ -70,7 +72,8 @@ class Workspace extends EventEmitter {
     this.limits = limits;
     this.blobBytes = 0; // bytes in blobs/
     this.metaBytes = 0; // state.json + events.jsonl
-    this.refs = new Map(); // blob hash -> references from file history and conflicts
+    this.refs = new Map(); // blob hash -> references from file history and open conflicts
+    this.unreferenced = new Set(); // blobs to delete once the state that no longer needs them is saved
     this.events = [];
     this.delivered = new Map(); // seq -> Set(agentId)
     this.claims = new Map(); // path -> { agentId, hash, at } recent agent edit claims, used to attribute synced writes
@@ -115,7 +118,7 @@ class Workspace extends EventEmitter {
     }
     for (const [seq, ids] of Object.entries(this.state.delivered || {})) this.delivered.set(Number(seq), new Set(ids));
     for (const f of Object.values(this.state.files)) for (const h of f.history || []) this._ref(h.hash, 1);
-    for (const c of Object.values(this.state.conflicts)) this._ref(c.incomingHash, 1);
+    for (const c of Object.values(this.state.conflicts)) if (!c.released) this._ref(c.incomingHash, 1);
     for (const n of ['state.json', 'events.jsonl']) { try { this.metaBytes += fs.statSync(path.join(this.dataDir, n)).size; } catch { /* not written yet */ } }
     delete this.state.delivered;
   }
@@ -125,7 +128,10 @@ class Workspace extends EventEmitter {
     for (const k of DICT_KEYS) this.state[k] = dict(this.state[k]);
     for (const p of Object.keys(this.state.reservations)) this.state.reservations[p] = dict(this.state.reservations[p]);
     for (const a of Object.values(this.state.agents)) for (const k of ['reads', 'touched', 'edited', 'warned', 'contractsSeen']) a[k] = dict(a[k]);
-    for (const t of Object.values(this.state.tasks)) t.contractsUsed = dict(t.contractsUsed);
+    for (const t of Object.values(this.state.tasks)) {
+      t.contractsUsed = dict(t.contractsUsed);
+      if (t.changes) { t.changes = dict(t.changes); t.changeActors = dict(t.changeActors); }
+    }
   }
 
   _ref(hash, delta) {
@@ -133,11 +139,18 @@ class Workspace extends EventEmitter {
     const n = (this.refs.get(hash) || 0) + delta;
     if (n > 0) { this.refs.set(hash, n); return; }
     this.refs.delete(hash);
-    // No file version or conflict needs this content any more: free the space.
-    if (this.dataDir && !this._removed) {
+    // Nothing needs this content any more. Delete it after the next save, so a crash before that save
+    // can't leave the saved state pointing at missing content.
+    if (this.dataDir) { this.unreferenced.add(hash); this._saveSoon(); } else this._mem?.delete(hash);
+  }
+
+  _deleteUnreferenced() {
+    for (const hash of this.unreferenced) {
+      if (this.refs.has(hash)) continue; // referenced again since
       const p = path.join(this.dataDir, 'blobs', hash);
       try { const size = fs.statSync(p).size; fs.unlinkSync(p); this.blobBytes = Math.max(0, this.blobBytes - size); } catch { /* already gone */ }
-    } else this._mem?.delete(hash);
+    }
+    this.unreferenced.clear();
   }
 
   // Everything a hosted project keeps on disk: file content plus its state and event log.
@@ -164,6 +177,7 @@ class Workspace extends EventEmitter {
     fs.writeFileSync(tmp, json);
     fs.renameSync(tmp, path.join(this.dataDir, 'state.json'));
     this.metaBytes += Buffer.byteLength(json) - before;
+    if (this.unreferenced.size) this._deleteUnreferenced();
   }
 
   _putBlob(buf) {
@@ -171,7 +185,12 @@ class Workspace extends EventEmitter {
     if (this.dataDir) {
       const p = path.join(this.dataDir, 'blobs', h);
       if (!fs.existsSync(p)) {
-        if (this.limits.maxBytes && this._usedBytes() + buf.length > this.limits.maxBytes) throw new CoordError(`This project has reached its storage limit (${Math.round(this.limits.maxBytes / 1048576)} MB) on this server`, 'too_large');
+        // Old versions waiting to be deleted still count; delete them now rather than refuse the write.
+        if (this.limits.maxBytes && this._usedBytes() + buf.length > this.limits.maxBytes && this.unreferenced.size) {
+          clearTimeout(this._saveTimer); this._saveTimer = null;
+          this.saveNow();
+        }
+        if (this.limits.maxBytes && this._usedBytes() + buf.length > this.limits.maxBytes) throw new CoordError(`This project has reached its storage limit (${fmtBytes(this.limits.maxBytes)}) on this server`, 'too_large');
         fs.writeFileSync(p, buf);
         this.blobBytes += buf.length;
       }
@@ -204,6 +223,7 @@ class Workspace extends EventEmitter {
       data,
     };
     e.summary = this._describe(e);
+    if (e.task && (type === 'file.changed' || type === 'file.deleted')) this._recordChange(e);
     this.events.push(e);
     if (this.dataDir && !this._removed) {
       const line = JSON.stringify(e) + '\n';
@@ -268,11 +288,25 @@ class Workspace extends EventEmitter {
   }
 
   // Keeps the newest events in memory and rewrites events.jsonl to match, so neither grows forever.
-  // Review and Revert of a task that isn't integrated yet read its file events, so those are always kept.
+  // Which files a task changed, and from which version, live on the task itself (Review and Revert read
+  // them there), so the event log can be trimmed freely.
+  _recordChange(e) {
+    const t = this.state.tasks[e.task];
+    if (!t) return;
+    t.changes ||= dict();
+    t.changeActors ||= dict();
+    for (const p of e.files) {
+      if (!t.changes[p]) {
+        const before = this.state.files[p]?.history.filter((h) => h.at < e.ts).slice(-1)[0] || null;
+        t.changes[p] = { beforeVersion: before ? before.version : 0, by: e.actor.name, branch: e.branch };
+      }
+      t.changes[p].lastBy = e.actor.name;
+    }
+    t.changeActors[e.actor.id] = true;
+  }
+
   _trimEvents() {
-    const cut = this.events.length - Math.floor((this.limits.maxEvents || MAX_EVENTS) * 0.8);
-    const open = (id) => { const t = this.state.tasks[id]; return t && t.status !== 'cancelled' && t.integration?.state !== 'merged'; };
-    this.events = this.events.filter((e, i) => i >= cut || (e.task && /^file\./.test(e.type) && open(e.task)));
+    this.events.splice(0, this.events.length - Math.floor((this.limits.maxEvents || MAX_EVENTS) * 0.8));
     if (!this.dataDir || this._removed) return;
     const f = path.join(this.dataDir, 'events.jsonl');
     try {
@@ -337,9 +371,8 @@ class Workspace extends EventEmitter {
     if (typeof fn !== 'function') throw new CoordError(`Unknown operation: ${op}`, 'unknown_op');
     if (poisoned(args) || poisoned(ctx.user)) throw new CoordError('Invalid request', 'invalid');
     if (!CONTENT_OPS.has(op) && JSON.stringify(args || {}).length > MAX_ARGS_BYTES) throw new CoordError('Request too large', 'too_large');
-    // A hosted project that is over its storage budget can still be read (and files deleted), not grown.
-    if (this.limits.maxBytes && this._usedBytes() > this.limits.maxBytes && !READ_OPS.has(op) && !(op === 'filePut' && args.deleted)) {
-      throw new CoordError(`This project has reached its storage limit (${Math.round(this.limits.maxBytes / 1048576)} MB) on this server`, 'too_large');
+    if (this.limits.maxBytes && GROWTH_OPS.has(op) && this.metaBytes > this.limits.maxBytes / 4) {
+      throw new CoordError(`This project has reached its storage limit (${fmtBytes(this.limits.maxBytes)}) for tasks and history on this server. Delete finished tasks or old files to make room.`, 'too_large');
     }
     if (op !== 'registerAgent') {
       if (args.agentId && !this.state.agents[args.agentId]) throw new CoordError(`Unknown agent ${args.agentId}. Register first.`, 'unknown_agent');
@@ -388,7 +421,8 @@ class Workspace extends EventEmitter {
     if (a) {
       const wasInactive = !ACTIVE.has(a.status);
       Object.assign(a, { client: client || a.client, cwd: cwd || a.cwd, lastSeen: Date.now() });
-      if (taskId && taskId !== a.taskId) this._assign(a, taskId);
+      // A reconnecting agent whose task has moved on to another live agent rejoins without it.
+      if (taskId && taskId !== a.taskId) { try { this._assign(a, taskId); } catch (e) { if (e.code !== 'busy') throw e; } }
       if (wasInactive) this._setAgentStatus(a, 'working', 'reconnected');
       const missed = this._relevantSince(a, a.cursor);
       return { agent: this._agentView(a), reconnected: true, missedCount: missed.length, missed: this._digestText(missed) };
@@ -405,9 +439,19 @@ class Workspace extends EventEmitter {
     return { agent: this._agentView(a), reconnected: false, missedCount: 0, missed: '' };
   }
 
+  // The agent that currently has a task: it is running or blocked under that agent, and the agent is
+  // alive and still on it. Nobody else may start, claim or reopen the task while this returns someone.
+  _liveOwner(t) {
+    if (!t || !['running', 'blocked'].includes(t.status) || !t.assignee) return null;
+    const a = this.state.agents[t.assignee];
+    return a && ACTIVE.has(a.status) && a.taskId === t.id ? a : null;
+  }
+
   _assign(a, taskId) {
     const t = this.state.tasks[taskId];
     if (!t) throw new CoordError(`Unknown task ${taskId}`);
+    const owner = this._liveOwner(t);
+    if (owner && owner.id !== a.id) throw new CoordError(`${owner.name} is working on this task.`, 'busy');
     a.taskId = taskId;
     if (t.assignee !== a.id) {
       t.assignee = a.id; t.assigneeName = a.name; t.updatedAt = Date.now();
@@ -591,12 +635,14 @@ class Workspace extends EventEmitter {
 
   op_startTask({ taskId, agentId, branch, worktree, baseCommit, force }, ctx) {
     const t = this._task(taskId);
-    if (t.status === 'running') throw new CoordError('Task is already running');
-    // Restarting a failed, finished or cancelled task is a deliberate choice (Retry / Reopen), never automatic,
-    // and a blocked task stays with the agent that reported the blocker.
-    if (['failed', 'done', 'cancelled', 'blocked'].includes(t.status) && !force) throw new CoordError(`Task is ${t.status}. Start it again from the board.`, 'not_ready');
-    const owner = t.assignee && t.assignee !== agentId && this.state.agents[t.assignee];
-    if (owner && ACTIVE.has(owner.status) && !force) throw new CoordError(`${owner.name} is still working on this task.`, 'busy');
+    // Running with no live agent (it crashed or quit without releasing the task) can be picked up.
+    if (t.status === 'running' && this._liveOwner(t)?.id === agentId) throw new CoordError('Task is already running');
+    // A live agent keeps its task, whatever the caller asks for.
+    const owner = this._liveOwner(t);
+    if (owner && owner.id !== agentId) throw new CoordError(`${owner.name} is working on this task.`, 'busy');
+    // Restarting a failed, finished or cancelled task is a deliberate choice (Retry / Reopen), never automatic.
+    if (['failed', 'done', 'cancelled'].includes(t.status) && !force) throw new CoordError(`Task is ${t.status}. Start it again from the board.`, 'not_ready');
+    if (t.status === 'done' && t.integration?.state === 'merged') throw new CoordError('This task was merged. Reopen it from the board to work on it again.', 'merged');
     if (t.status === 'waiting' && !force) {
       const pending = t.dependsOn.map((d) => this.state.tasks[d]).filter((d) => d && !this._depSatisfied(d, t)).map((d) => (d.status === 'done' ? `${d.title} (needs merge)` : d.title));
       throw new CoordError(`Task is waiting on: ${pending.join(', ')}`, 'waiting');
@@ -640,10 +686,10 @@ class Workspace extends EventEmitter {
     return t;
   }
 
-  op_reopenTask({ taskId, force }, ctx) {
+  op_reopenTask({ taskId, agentId }, ctx) {
     const t = this._task(taskId);
-    // A running or blocked task belongs to a live agent; only that agent's own app may release it.
-    if (['running', 'blocked'].includes(t.status) && !force) throw new CoordError(`Task is ${t.status}; it can't be reopened while an agent has it.`, 'busy');
+    const owner = this._liveOwner(t);
+    if (owner && owner.id !== agentId) throw new CoordError(`${owner.name} has this task; it can't be reopened until that agent stops.`, 'busy');
     t.status = 'waiting'; t.updatedAt = Date.now();
     this._recomputeReadiness(this._actor({}, ctx));
     this.emitEvent('task.updated', this._actor({}, ctx), { task: t.id, data: { changes: { status: t.status } } });
@@ -1127,6 +1173,16 @@ class Workspace extends EventEmitter {
   // Files changed by a shared-mode task, with the version before the task first touched them.
   op_taskChanges({ taskId }) {
     const t = this._task(taskId);
+    if (t.changes) {
+      return Object.entries(t.changes).map(([p, c]) => {
+        const f = this.state.files[p];
+        return {
+          path: p, beforeVersion: c.beforeVersion, by: c.by, branch: c.branch, afterVersion: f?.version || null, lastBy: c.lastBy,
+          changedByOthersSince: f ? f.history.filter((h) => h.version > (c.beforeVersion || 0) && h.by?.id && !t.changeActors[h.by.id]).map((h) => h.by.name) : [],
+        };
+      });
+    }
+    // Tasks from before change records existed: rebuild from the event log.
     const out = dict();
     for (const e of this.events) {
       if (e.task !== t.id || !['file.changed', 'file.deleted'].includes(e.type)) continue;
@@ -1147,10 +1203,16 @@ class Workspace extends EventEmitter {
     return Object.values(out);
   }
 
+  // A resolved sync conflict no longer needs the content that was uploaded with it.
+  _releaseConflict(c) {
+    if (c.incomingHash && !c.released) { this._ref(c.incomingHash, -1); c.released = true; }
+  }
+
   op_resolveConflictRecord({ conflictId, resolution }, ctx) {
     const c = this.state.conflicts[conflictId];
     if (!c) throw new CoordError('Unknown conflict');
     c.status = 'resolved'; c.resolution = resolution || 'acknowledged';
+    this._releaseConflict(c);
     this.emitEvent('conflict.resolved', this._actor({}, ctx), { task: c.taskId, files: [c.path], data: { id: c.id, resolution: c.resolution } });
     return c;
   }
@@ -1179,6 +1241,11 @@ class Workspace extends EventEmitter {
     Object.assign(f, { hash, deleted: !!deleted, size: deleted ? 0 : buf.length, binary: deleted ? false : isBinary(buf), by: { kind: actor.kind, id: actor.id, name: actor.name }, at: Date.now() });
     f.history.push({ version: f.version, hash, deleted: !!deleted, by: f.by, at: f.at });
     this._ref(hash, 1);
+    // On a hosted project that is nearly full, deleting a file also frees its earlier versions.
+    if (deleted && this.limits.maxBytes && this._usedBytes() > this.limits.maxBytes * 0.9) {
+      for (const old of f.history.slice(0, -1)) this._ref(old.hash, -1);
+      f.history = f.history.slice(-1);
+    }
     if (f.history.length > MAX_HISTORY) {
       for (const old of f.history.slice(0, f.history.length - MAX_HISTORY)) this._ref(old.hash, -1);
       f.history = f.history.slice(-MAX_HISTORY);
@@ -1261,7 +1328,10 @@ class Workspace extends EventEmitter {
     const actor = this._actor({}, ctx);
     let buf = null, deleted = false;
     if (resolution === 'incoming') { deleted = c.incomingDeleted; buf = deleted ? null : this._getBlob(c.incomingHash); }
-    else if (resolution === 'content') buf = Buffer.from(contentB64 || '', 'base64');
+    else if (resolution === 'content') {
+      buf = Buffer.from(contentB64 || '', 'base64');
+      if (buf.length > MAX_FILE_BYTES) throw new CoordError(`${c.path} is larger than 5 MB and is not synced`);
+    }
     if (resolution !== 'current') {
       const f = this._applyFile(c.path, buf, deleted, actor, { origin: null });
       this.emitEvent('file.changed', actor, { files: [c.path], branch: 'main', version: f.version, data: { hash: f.hash, resolution } });
@@ -1271,6 +1341,7 @@ class Workspace extends EventEmitter {
       this.emit('file', { path: c.path, version: f.version, hash: f.hash, deleted: !!f.deleted, contentB64: f.deleted ? null : this._getBlob(f.hash).toString('base64'), by: f.by, origin: null });
     }
     c.status = 'resolved'; c.resolution = resolution;
+    this._releaseConflict(c);
     this.emitEvent('conflict.resolved', actor, { files: [c.path], data: { id: c.id, resolution } });
     return c;
   }
@@ -1323,7 +1394,7 @@ class Workspace extends EventEmitter {
         this._releaseAll(a, true);
         this._setAgentStatus(a, 'offline', 'disconnected');
         const t = a.taskId && this.state.tasks[a.taskId];
-        if (t && t.status === 'running') {
+        if (t && ['running', 'blocked'].includes(t.status) && t.assignee === a.id) {
           t.status = 'ready';
           this.emitEvent('task.updated', null, { task: t.id, data: { changes: { status: 'ready' }, reason: `${a.name} disconnected; task returned to queue` } });
         }

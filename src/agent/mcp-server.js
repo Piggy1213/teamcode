@@ -151,8 +151,14 @@ const TOOLS = [
     inputSchema: S({ task_id: str('Task id from team_status') }, ['task_id']),
     run: async (a) => {
       if (!cfg.userId) throw new Error('This connection is not linked to a TeamCode user. Add it from the TeamCode app (Settings, Claude Code) to start tasks on your computer.');
-      const before = await agentCall(cfg, 'updateTask', { taskId: a.task_id, runner: cfg.userId, runnerName: cfg.userName || cfg.name, autoStart: true });
-      if (before.status === 'running' || before.status === 'blocked') return `"${before.title}" is ${before.status} with another agent. It will start here if that agent releases it.`;
+      const snap = await agentCall(cfg, 'snapshot', {});
+      const current = snap.tasks?.[a.task_id];
+      if (!current) throw new Error(`No task ${a.task_id}. Use team_status to see task ids.`);
+      // Same rule as the server: a task is taken only while a live agent is on it.
+      const owner = current.assignee && snap.agents?.[current.assignee];
+      const busy = ['running', 'blocked'].includes(current.status) && owner && ['starting', 'working', 'idle', 'waiting', 'blocked'].includes(owner.status) && owner.task?.id === current.id;
+      if (busy) return `"${current.title}" is ${current.status} with ${current.assigneeName || 'another agent'}. It can be started here once that agent stops.`;
+      await agentCall(cfg, 'updateTask', { taskId: a.task_id, runner: cfg.userId, runnerName: cfg.userName || cfg.name, autoStart: true });
       // Reopening also marks the task as changed, so the app retries it even if an earlier start failed.
       const t = await agentCall(cfg, 'reopenTask', { taskId: a.task_id });
       return `"${t.title}" will start on ${cfg.userName ? `${cfg.userName}'s` : 'your'} computer ${t.status === 'ready' ? 'in a moment' : 'when its dependencies are done'}. The TeamCode app needs to be open.`;

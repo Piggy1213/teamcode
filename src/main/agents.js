@@ -308,6 +308,9 @@ class AgentManager extends EventEmitter {
     // finishes quickly, which would skip completing it.
     const fresh = await this.conn.call('snapshot').catch(() => null);
     const task = fresh?.tasks?.[m.taskId] || this.getState()?.tasks?.[m.taskId];
+    // Another live agent may have taken the task over (e.g. after this computer slept): then this agent
+    // only reports itself as gone and leaves the task alone.
+    const mine = !task?.assignee || task.assignee === agentId;
     try {
       if (run.handoff) {
         this.log(agentId, 'system', 'Continuing in Claude Code. Its work comes back here when you press Send for review.');
@@ -317,9 +320,9 @@ class AgentManager extends EventEmitter {
         this.log(agentId, 'system', 'Stopped by user');
         await this.conn.call('agentExited', { agentId, outcome: 'stopped' }).catch(() => {});
         // Back to the queue, but not straight back into an agent: wait for someone to start it again.
-        if (task && ['running', 'blocked'].includes(task.status)) {
+        if (mine && task && ['running', 'blocked'].includes(task.status)) {
           await this.conn.call('updateTask', { taskId: m.taskId, autoStart: false }).catch(() => {});
-          await this.conn.call('reopenTask', { taskId: m.taskId, force: true }).catch(() => {});
+          await this.conn.call('reopenTask', { taskId: m.taskId, agentId }).catch(() => {});
         }
         return;
       }
@@ -328,7 +331,10 @@ class AgentManager extends EventEmitter {
         this.emit('needsLogin');
         this.log(agentId, 'error', 'Claude Code is not signed in. Use Settings, Sign in to Claude Code, then restart the task.');
       }
-      if (res && !res.is_error && res.subtype === 'success' && !run.notLoggedIn) {
+      if (!mine) {
+        this.log(agentId, 'system', `${task.assigneeName || 'Another agent'} has this task now, so this agent's result wasn't recorded on it.`);
+        await this.conn.call('agentExited', { agentId, outcome: 'stopped' }).catch(() => {});
+      } else if (res && !res.is_error && res.subtype === 'success' && !run.notLoggedIn) {
         const summary = clip(res.result || 'Completed', 1200);
         if (task && ['running', 'blocked'].includes(task.status)) await this.conn.call('completeTask', { agentId, taskId: m.taskId, summary });
         await this._requestReview(agentId, m, task, summary);
@@ -382,7 +388,10 @@ class AgentManager extends EventEmitter {
     const m = this.meta[agentId];
     if (!m) throw new Error('This agent was not started on this computer');
     if (!m.sessionId) throw new Error('This agent has no session to continue');
-    const task = this.getState()?.tasks?.[m.taskId];
+    if (!fs.existsSync(m.cwd)) throw new Error('This agent\'s folder no longer exists (its work was merged or removed). Start a new agent from the task instead.');
+    if ([...this.running.entries()].some(([id, r]) => id !== agentId && r.taskId === m.taskId && !r.exited)) throw new Error('Another agent is running this task now.');
+    const task = (await this.conn.call('snapshot').catch(() => null))?.tasks?.[m.taskId] || this.getState()?.tasks?.[m.taskId];
+    if (task?.status === 'done' && task.integration?.state === 'merged') throw new Error('This task was merged. Reopen it from the board to keep working on it.');
     await this.conn.call('registerAgent', { agentId, name: m.name, client: 'Claude Code', taskId: m.taskId, userId: this.user.id, mode: m.mode, branch: m.branch, cwd: m.cwd });
     if (task && task.status !== 'running') await this.conn.call('startTask', { taskId: m.taskId, agentId, branch: m.branch, worktree: m.worktree, baseCommit: m.baseCommit, force: true });
     this.log(agentId, 'user', text);
@@ -448,7 +457,7 @@ class AgentManager extends EventEmitter {
       // Couldn't open a window: release the task like a Stop would.
       await this.conn.call('agentExited', { agentId, outcome: 'stopped' }).catch(() => {});
       await this.conn.call('updateTask', { taskId: m.taskId, autoStart: false }).catch(() => {});
-      await this.conn.call('reopenTask', { taskId: m.taskId, force: true }).catch(() => {});
+      await this.conn.call('reopenTask', { taskId: m.taskId, agentId }).catch(() => {});
       this.emit('runtime');
       throw e;
     }
