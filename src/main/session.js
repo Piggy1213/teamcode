@@ -146,7 +146,8 @@ class ProjectSession {
 
   async runTests(taskId) {
     const t = taskId ? this._task(taskId) : null;
-    const cmd = this.state.settings.testCommand || this.getSettings().testCommand;
+    const shared = (await this.call('snapshot').catch(() => this.state)).settings;
+    const cmd = shared?.testCommand || this.getSettings().testCommand;
     if (!cmd) throw new Error('Set a test command in Settings first (e.g. "npm test")');
     const cwd = t?.worktree && fs.existsSync(t.worktree) ? t.worktree : this.project.root;
     this.send('tc:toast', { kind: 'info', text: `Running "${cmd}"…` });
@@ -168,6 +169,9 @@ class ProjectSession {
       const overlapDirty = changed.filter((f) => dirty.has(f));
       if (overlapDirty.length) risks.push({ kind: 'working-copy', message: `Uncommitted changes in the main working copy overlap this branch: ${overlapDirty.slice(0, 6).join(', ')}. Commit them (Checkpoint) before merging.` });
       risks.push(...git.breakingChanges(await git.diff(root, t.baseCommit || 'HEAD', t.branch)));
+      for (const d of t.dependsOn.map((id) => this.state.tasks[id]).filter(Boolean)) {
+        if (d.mode === 'isolated' && d.branch && d.branch !== 'main' && d.integration?.state !== 'merged') risks.push({ kind: 'dependency', message: `Built on top of "${d.title}", which isn't merged yet — merging this also brings in that work. Review and merge it first.` });
+      }
     } else if (t.mode !== 'isolated') {
       const changes = await this.call('taskChanges', { taskId });
       for (const c of changes) if (c.changedByOthersSince.length) risks.push({ kind: 'overlap', message: `${c.path} was also changed by ${[...new Set(c.changedByOthersSince)].join(', ')} after this task` });

@@ -14,6 +14,8 @@ const { spawnSpec, shellQuote, findNode } = require('./claude-cli');
 
 const NAMES = ['Nova', 'Atlas', 'Pixel', 'Echo', 'Orbit', 'Sage', 'Blaze', 'Quill', 'Rune', 'Flux', 'Iris', 'Kite', 'Lumen', 'Mako', 'Halo', 'Cosmo', 'Dash', 'Juno', 'Vega', 'Zephyr'];
 const EDIT_TOOLS = 'Edit|Write|MultiEdit|NotebookEdit';
+// Allowed for agents in every permission mode (Windows agents run commands through the PowerShell tool).
+const SAFE_COMMANDS = ['npm test', 'npm run test', 'node --test', 'git status', 'git diff', 'git log', 'git show'];
 const isWin = process.platform === 'win32';
 
 const clip = (s, n) => { s = String(s ?? ''); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
@@ -51,8 +53,12 @@ class AgentManager extends EventEmitter {
   getLog(agentId) { return this.logs.get(agentId) || []; }
 
   _pickName() {
-    const used = new Set(Object.values(this.getState()?.agents || {}).map((a) => a.name.split(' ')[0]));
-    return NAMES.find((n) => !used.has(n)) || `Agent-${crypto.randomBytes(2).toString('hex')}`;
+    // Agents started in the same tick aren't in the snapshot yet, so also count names handed out locally.
+    this.namesTaken ||= new Set();
+    const used = new Set([...Object.values(this.getState()?.agents || {}).map((a) => a.name.split(' ')[0]), ...this.namesTaken]);
+    const name = NAMES.find((n) => !used.has(n)) || `Agent-${crypto.randomBytes(2).toString('hex')}`;
+    this.namesTaken.add(name);
+    return name;
   }
 
   async startTask(taskId) {
@@ -72,6 +78,9 @@ class AgentManager extends EventEmitter {
         worktree = path.join(this.dataDir, 'worktrees', `${slug(task.title)}-${taskId.slice(-6)}`);
         const wt = await git.createWorktree(this.root, worktree, branch);
         cwd = worktree; baseCommit = wt.baseCommit;
+        // Dependencies that finished on their own branches but aren't merged yet: build on top of their work.
+        const merged = await this._mergeDependencyBranches(agentId, task, worktree);
+        if (merged) baseCommit = await git.head(worktree);
       } else {
         mode = 'shared';
         this.log(agentId, 'system', 'Isolated mode needs a git repository with at least one commit — running in the shared working copy instead.');
@@ -88,6 +97,20 @@ class AgentManager extends EventEmitter {
     this.log(agentId, 'system', `${name} starting "${task.title}" (${mode === 'isolated' ? `isolated worktree on ${branch}` : 'shared working copy'})`);
     this._spawn(agentId, this._briefing(name, task, ctx, mode, branch));
     return { agentId, name };
+  }
+
+  async _mergeDependencyBranches(agentId, task, worktree) {
+    let merged = 0;
+    for (const id of task.dependsOn || []) {
+      const dep = this.getState()?.tasks?.[id];
+      if (!dep || dep.mode !== 'isolated' || !dep.branch || dep.branch === 'main' || dep.integration?.state === 'merged') continue;
+      const exists = (await git.git(this.root, ['rev-parse', '--verify', `refs/heads/${dep.branch}`], { allowFail: true })).code === 0;
+      if (!exists) { this.log(agentId, 'system', `Dependency "${dep.title}" is on ${dep.branch}, which isn't on this computer — its code won't be in this worktree until it's merged.`); continue; }
+      const r = await git.merge(worktree, dep.branch, `Build on "${dep.title}" (TeamCode dependency)`);
+      if (r.ok) { merged++; this.log(agentId, 'system', `Included unmerged dependency "${dep.title}" from ${dep.branch}`); }
+      else this.log(agentId, 'error', `Could not combine dependency "${dep.title}" (${r.conflicts.join(', ') || r.error}) — starting without it.`);
+    }
+    return merged;
   }
 
   _briefing(name, task, ctx, mode, branch) {
@@ -149,7 +172,8 @@ class AgentManager extends EventEmitter {
     const args = ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose',
       '--mcp-config', mcpFile, '--settings', settingsFile,
       '--permission-mode', settings.permissionMode || 'acceptEdits',
-      '--allowedTools', 'mcp__teamcode'];
+      // Read-only git and the project's test commands are safe to allow in every permission mode.
+      '--allowedTools', 'mcp__teamcode', ...SAFE_COMMANDS.flatMap((c) => [`Bash(${c}:*)`, `PowerShell(${c}:*)`])];
     if (settings.model) args.push('--model', settings.model);
     if (resumeSessionId) args.push('--resume', resumeSessionId);
     const spec = spawnSpec(settings.claudePath, findNode());

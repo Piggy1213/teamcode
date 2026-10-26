@@ -186,7 +186,10 @@ The Review view gives you:
 ```bash
 npm test         # acceptance tests (real server, sync, MCP server, hooks, git, agent runner)
 npm run smoke    # launches the app, drives every view with demo data, saves screenshots
+node scripts/live-test.js <repo> "<feature>"   # real Claude Code: plan → parallel agents → review → test → merge
 ```
+
+The live test prints an invite code so you can watch the run in the app (Join your team). It needs a signed-in Claude Code (`claude auth login`).
 
 The acceptance suite covers the scenarios from the spec:
 

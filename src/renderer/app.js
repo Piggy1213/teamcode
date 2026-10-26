@@ -112,7 +112,7 @@ function renderNow() {
 
 function claudeBanner() {
   const c = S.init.claude;
-  if (S.needsLogin) return `<div class="banner warn"><span>🔑</span><div class="spacer"><b>Claude Code needs you to sign in.</b> <span class="muted">Agents can't run until you do. It only takes a moment.</span></div><button class="btn primary sm" data-act="login">Sign in to Claude Code</button></div>`;
+  if (S.needsLogin || c.loggedIn === false) return `<div class="banner warn"><span>🔑</span><div class="spacer"><b>Claude Code needs you to sign in.</b> <span class="muted">Agents can't run until you do. It only takes a moment.</span></div><button class="btn primary sm" data-act="login">Sign in to Claude Code</button></div>`;
   if (!c.path) return `<div class="banner warn"><span>⚠️</span><div class="spacer"><b>Claude Code not found.</b> <span class="muted">Install it (npm i -g @anthropic-ai/claude-code) or point TeamCode at it.</span></div><button class="btn sm" data-act="detect-claude">Detect again</button><button class="btn sm" data-act="browse-claude">Locate…</button></div>`;
   return `<div class="banner ok"><span>✅</span><div class="spacer"><b>Claude Code ready</b> <span class="muted">${esc(c.version || '')} · ${esc(c.path)}</span></div><button class="btn sm ghost" data-act="login">Sign in / switch account</button></div>`;
 }
@@ -189,7 +189,7 @@ function shell() {
         <button class="btn" data-act="plan-modal" title="Let Claude split a feature into parallel tasks">✨ Plan a feature</button>
         <button class="btn primary" data-act="task-modal" title="${MOD}+N">＋ New task</button>
       </div>
-      ${S.needsLogin || !S.init.claude.path ? `<div style="padding:12px 20px 0">${claudeBanner()}</div>` : ''}
+      ${S.needsLogin || !S.init.claude.path || S.init.claude.loggedIn === false ? `<div style="padding:12px 20px 0">${claudeBanner()}</div>` : ''}
       ${S.state ? VIEW_RENDER[S.view]() : `<div class="view"><div class="empty"><span class="spinner"></span><div>${S.status === 'offline' ? 'Reconnecting to the team workspace…' : 'Connecting to the team workspace…'}</div></div></div>`}
     </section>
   </div>`;
@@ -259,6 +259,9 @@ function runningAgentFor(taskId) {
   return Object.entries(S.runtime).find(([, r]) => r.taskId === taskId && r.running)?.[0];
 }
 
+// Mirrors the server rule: shared-mode work only sees an isolated dependency once it is merged.
+const depIcon = (d, t) => (d.status !== 'done' ? '⏳' : d.mode === 'isolated' && t.mode !== 'isolated' && d.integration?.state !== 'merged' ? '🔀' : '✅');
+
 function taskCard(t) {
   const deps = t.dependsOn.map((d) => S.state.tasks[d]).filter(Boolean);
   const agentId = runningAgentFor(t.id);
@@ -266,7 +269,7 @@ function taskCard(t) {
   return `<div class="task-card" data-act="task-detail" data-id="${t.id}">
     <div class="row"><span class="prio p${t.priority}">P${t.priority}</span><span class="title spacer">${esc(t.title)}</span></div>
     <div class="row wrap tiny">${taskPill(t.status)}<span class="pill nodot">${t.mode === 'isolated' ? '🌿 isolated' : '📁 shared'}</span>${t.autoStart ? '<span class="pill nodot" title="Starts automatically when ready">⚡ auto</span>' : ''}</div>
-    ${deps.length ? `<div class="deps">${deps.map((d) => `<span>${d.status === 'done' ? '✅' : '⏳'} ${esc(d.title)}</span>`).join('')}</div>` : ''}
+    ${deps.length ? `<div class="deps">${deps.map((d) => `<span>${depIcon(d, t)} ${esc(d.title)}${d.status === 'done' && depIcon(d, t) === '🔀' ? ' <span class="faint">(needs merge)</span>' : ''}</span>`).join('')}</div>` : ''}
     ${t.parallelNotes?.length ? `<div class="warnbox tiny">Shares files with ${t.parallelNotes.map((p) => `"${esc(p.title)}"`).join(', ')} — avoid running together</div>` : ''}
     <div class="row tiny muted">${[t.assigneeName && `🤖 ${esc(t.assigneeName)}`, t.runnerName && `💻 ${esc(t.runnerName)}`].filter(Boolean).join(' · ')}</div>
     <div class="actions">
@@ -655,7 +658,16 @@ A['save-name'] = async () => { const n = $('#w-name').value.trim(); if (!n) retu
 A['set-name'] = async () => { S.init.user = await run(() => api('app:setUser', { name: $('#set-name').value }), 'Saved') || S.init.user; render(); };
 A['detect-claude'] = async () => { const r = await run(() => api('app:detectClaude')); if (r) { S.init.claude = r; S.init.settings.claudePath = r.path; toast(r.path ? `Found ${r.version || 'Claude Code'}` : 'Claude Code not found', r.path ? 'ok' : 'warn'); render(); } };
 A['browse-claude'] = async () => { const r = await run(() => api('app:browseClaude')); if (r) { S.init.claude = r; render(); } };
-A.login = async () => { await run(() => api('app:loginClaude')); S.needsLogin = false; toast('Finish signing in in the terminal window, then start your tasks.', 'info', 8000); render(); };
+A.login = async () => {
+  if (!(await run(() => api('app:loginClaude')))) return;
+  toast('Finish signing in in the window that opened — TeamCode notices automatically.', 'info', 8000);
+  // Poll until the CLI reports a signed-in account.
+  for (let i = 0; i < 100; i++) {
+    await new Promise((r) => setTimeout(r, 3000));
+    const c = await api('app:claudeStatus').catch(() => null);
+    if (c?.loggedIn) { S.init.claude = c; S.needsLogin = false; toast('Signed in to Claude Code ✓', 'ok'); render(); return; }
+  }
+};
 
 async function openProject(p) {
   if (!me().name) return toast('Enter your name first', 'warn');

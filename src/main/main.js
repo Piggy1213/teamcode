@@ -9,7 +9,7 @@ const https = require('https');
 const { TeamServer } = require('../../server/server');
 const { encodeInvite, decodeInvite } = require('../../server/invite');
 const { ProjectSession } = require('./session');
-const { findClaude, claudeVersion, loginScript, findNode } = require('./claude-cli');
+const { findClaude, claudeVersion, claudeAuthStatus, loginScript, findNode } = require('./claude-cli');
 const git = require('./git');
 
 const DEFAULT_PORT = 4477;
@@ -109,6 +109,12 @@ function requireSession() {
   return session;
 }
 
+async function claudeInfo(p) {
+  if (!p) return { path: null, version: null, loggedIn: null };
+  const [version, auth] = await Promise.all([claudeVersion(p), claudeAuthStatus(p)]);
+  return { path: p, version, loggedIn: auth ? !!auth.loggedIn : null, account: auth?.email || null };
+}
+
 // ---------- IPC ----------
 const handlers = {
   'app:init': async () => {
@@ -119,7 +125,7 @@ const handlers = {
     return {
       user: config.user, settings: config.settings, platform: process.platform, version: app.getVersion(),
       projects: config.projects.filter((p) => fs.existsSync(p.root)).map(projectView),
-      claude: { path: config.settings.claudePath, version: config.settings.claudePath ? await claudeVersion(config.settings.claudePath) : null },
+      claude: await claudeInfo(config.settings.claudePath),
       nodeFound: !!findNode(),
       current: session ? projectView(session.project) : null,
     };
@@ -136,14 +142,15 @@ const handlers = {
   'app:detectClaude': async () => {
     const p = findClaude(null);
     if (p) { config.settings.claudePath = p; saveConfig(); }
-    return { path: p, version: p ? await claudeVersion(p) : null };
+    return claudeInfo(p);
   },
+  'app:claudeStatus': () => claudeInfo(config.settings.claudePath),
   'app:browseClaude': async () => {
     const r = await dialog.showOpenDialog(win, { title: 'Locate the Claude Code CLI', properties: ['openFile'] });
     if (r.canceled) return null;
     config.settings.claudePath = r.filePaths[0];
     saveConfig();
-    return { path: r.filePaths[0], version: await claudeVersion(r.filePaths[0]) };
+    return claudeInfo(r.filePaths[0]);
   },
   'app:loginClaude': async () => {
     if (!config.settings.claudePath) throw new Error('Claude Code was not found');

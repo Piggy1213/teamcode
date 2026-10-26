@@ -106,13 +106,23 @@ function loginScript(cliPath, dir) {
   fs.mkdirSync(dir, { recursive: true });
   if (isWin) {
     const f = path.join(dir, 'claude-login.cmd');
-    fs.writeFileSync(f, `@echo off\r\ntitle Claude Code sign-in\r\necho Sign in to Claude Code. If no login prompt appears, type /login and press Enter.\r\necho Close this window when you are done, then return to TeamCode.\r\n"${cliPath}" /login\r\n`);
+    fs.writeFileSync(f, `@echo off\r\ntitle Claude Code sign-in\r\necho Signing in to Claude Code - finish the steps in your browser.\r\n"${cliPath}" auth login\r\necho.\r\necho Done. You can close this window and return to TeamCode.\r\npause\r\n`);
     return f;
   }
   const f = path.join(dir, 'claude-login.command');
-  fs.writeFileSync(f, `#!/bin/sh\necho "Sign in to Claude Code. If no login prompt appears, type /login and press Enter."\necho "Close this window when you are done, then return to TeamCode."\n"${cliPath}" /login\n`);
+  fs.writeFileSync(f, `#!/bin/sh\necho "Signing in to Claude Code - finish the steps in your browser."\n"${cliPath}" auth login\necho "Done. You can close this window and return to TeamCode."\n`);
   fs.chmodSync(f, 0o755);
   return f;
 }
 
-module.exports = { findClaude, claudeVersion, spawnSpec, shellQuote, findNode, loginScript };
+// `claude auth status` prints JSON; null when the CLI is too old to support it.
+function claudeAuthStatus(cliPath) {
+  return new Promise((resolve) => {
+    const spec = spawnSpec(cliPath, findNode());
+    execFile(spec.command, [...spec.prefix, 'auth', 'status'], { timeout: 20000, windowsHide: true, shell: !!spec.shell }, (err, stdout) => {
+      try { resolve(JSON.parse(String(stdout))); } catch { resolve(null); }
+    });
+  });
+}
+
+module.exports = { findClaude, claudeVersion, claudeAuthStatus, spawnSpec, shellQuote, findNode, loginScript };

@@ -9,7 +9,7 @@ const { EventEmitter } = require('events');
 const { merge3 } = require('./merge');
 
 const EVENT_TYPES = [
-  'workspace.created', 'user.joined', 'user.left', 'chat.message',
+  'workspace.created', 'settings.updated', 'user.joined', 'user.left', 'chat.message',
   'agent.joined', 'agent.status_changed', 'agent.progress', 'agent.error', 'agent.approach_changed',
   'task.created', 'task.updated', 'task.assigned', 'task.ready', 'task.started', 'task.blocked',
   'task.completed', 'task.failed', 'task.cancelled', 'task.deleted',
@@ -145,6 +145,7 @@ class Workspace extends EventEmitter {
     const tt = t ? ` "${clip(t.title, 60)}"` : '';
     const f = e.files.length ? e.files.slice(0, 4).join(', ') + (e.files.length > 4 ? ` +${e.files.length - 4} more` : '') : '';
     switch (e.type) {
+      case 'settings.updated': return `${e.actor.name} updated workspace settings`;
       case 'workspace.created': return `Workspace "${d.name}" created`;
       case 'user.joined': return `${e.actor.name} joined`;
       case 'user.left': return `${e.actor.name} left`;
@@ -270,8 +271,9 @@ class Workspace extends EventEmitter {
     return this.emitEvent('chat.message', this._actor({}, ctx), { data: { text: String(text).slice(0, 4000) } });
   }
 
-  op_updateSettings({ settings }) {
+  op_updateSettings({ settings }, ctx) {
     Object.assign(this.state.settings, settings || {});
+    this.emitEvent('settings.updated', this._actor({}, ctx), { data: { settings: this.state.settings } });
     return this.state.settings;
   }
 
@@ -438,13 +440,21 @@ class Workspace extends EventEmitter {
   _recomputeReadiness(actor) {
     for (const t of Object.values(this.state.tasks)) {
       if (!['waiting', 'ready'].includes(t.status)) continue;
-      const pending = t.dependsOn.filter((d) => this.state.tasks[d] && this.state.tasks[d].status !== 'done');
+      const pending = t.dependsOn.filter((d) => this.state.tasks[d] && !this._depSatisfied(this.state.tasks[d], t));
       const next = pending.length ? 'waiting' : 'ready';
       if (next !== t.status) {
         t.status = next;
         if (next === 'ready') this.emitEvent('task.ready', actor || null, { task: t.id, data: { title: t.title } });
       }
     }
+  }
+
+  // An isolated dependent can start from the dependency's branch once it is completed; work in the shared
+  // working copy only sees an isolated dependency after it has been merged.
+  _depSatisfied(dep, t) {
+    if (dep.status !== 'done') return false;
+    if (dep.mode !== 'isolated' || t.mode === 'isolated') return true;
+    return dep.integration?.state === 'merged';
   }
 
   // Flags tasks that should not run in parallel because they expect to touch the same files.
@@ -478,7 +488,7 @@ class Workspace extends EventEmitter {
     const t = this._task(taskId);
     if (t.status === 'running') throw new CoordError('Task is already running');
     if (t.status === 'waiting' && !force) {
-      const pending = t.dependsOn.map((d) => this.state.tasks[d]).filter((d) => d && d.status !== 'done').map((d) => d.title);
+      const pending = t.dependsOn.map((d) => this.state.tasks[d]).filter((d) => d && !this._depSatisfied(d, t)).map((d) => (d.status === 'done' ? `${d.title} (needs merge)` : d.title));
       throw new CoordError(`Task is waiting on: ${pending.join(', ')}`, 'waiting');
     }
     const actor = this._actor({ agentId }, ctx);
@@ -990,7 +1000,9 @@ class Workspace extends EventEmitter {
     t.integration = { ...t.integration, state: 'merged', mergedAt: Date.now(), commit, conflicts: [] };
     if (t.review.state !== 'approved') t.review = { ...t.review, state: 'approved', by: this._actor({}, ctx).name, decidedAt: Date.now() };
     for (const c of Object.values(this.state.conflicts)) if (c.taskId === t.id && c.kind === 'merge' && c.status === 'open') c.status = 'resolved';
-    return this.emitEvent('changes.merged', this._actor({}, ctx), { task: t.id, branch: t.branch, files: t.review.files || [], data: { commit, into: into || 'main' } });
+    const e = this.emitEvent('changes.merged', this._actor({}, ctx), { task: t.id, branch: t.branch, files: t.review.files || [], data: { commit, into: into || 'main' } });
+    this._recomputeReadiness(this._actor({}, ctx));
+    return e;
   }
 
   op_markReverted({ taskId, commit }, ctx) {
