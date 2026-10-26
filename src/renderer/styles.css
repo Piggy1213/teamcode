@@ -93,6 +93,7 @@ svg.i { width: 15px; height: 15px; flex: none; vertical-align: -3px; }
   border-radius: var(--r); cursor: pointer; white-space: nowrap; font-weight: 500; box-shadow: var(--shadow);
   transition: background .1s, border-color .1s;
 }
+a.btn { text-decoration: none; }
 .btn:hover { background: var(--panel-2); }
 .btn:active { transform: translateY(.5px); }
 .btn:disabled { opacity: .45; cursor: default; }

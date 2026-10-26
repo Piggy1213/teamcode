@@ -12,6 +12,7 @@ const { ProjectSession } = require('./session');
 const { findClaude, claudeVersion, claudeAuthStatus, loginScript, findNode } = require('./claude-cli');
 const git = require('./git');
 const { Updater } = require('./updater');
+const { Account } = require('./account');
 const pkg = require('../../package.json');
 
 const DEFAULT_PORT = 4477;
@@ -28,6 +29,7 @@ let teamServer = null;
 let serverPort = null;
 let serverHost = null;
 let updater = null;
+let account = null;
 
 // ---------- config ----------
 const defaults = () => ({
@@ -132,6 +134,7 @@ const handlers = {
       nodeFound: !!findNode(),
       current: session ? projectView(session.project) : null,
       update: updater.state,
+      account: account.state,
     };
   },
   'app:setUser': ({ name }) => { config.user.name = String(name || '').trim().slice(0, 40) || 'Developer'; saveConfig(); return config.user; },
@@ -251,6 +254,11 @@ const handlers = {
   'review:reject': ({ taskId, note, discard }) => requireSession().reject(taskId, { note, discard }),
   'review:revert': ({ taskId }) => requireSession().revert(taskId),
 
+  'account:login': () => account.login(),
+  'account:cancel': () => account.cancel(),
+  'account:logout': () => account.logout(),
+  'account:refresh': () => account.refresh(),
+
   'update:check': () => updater.check(),
   'update:install': async () => { if (await updater.install({ relaunch: true })) app.quit(); return updater.state; },
 };
@@ -276,17 +284,21 @@ function createWindow() {
   if (process.env.TEAMCODE_SCREENSHOT) require('./smoke').run(win, { handlers, getSession: () => session, openSession, config });
 }
 
-// TEAMCODE_UPDATE_URL turns the updater on in development, for testing against a local website.
+// The TeamCode website serves updates and accounts. TEAMCODE_SITE_URL points a development build at a
+// local website and turns the updater on there (it downloads but never installs over the dev Electron).
+const siteUrl = process.env.TEAMCODE_SITE_URL || pkg.teamcode?.siteUrl || '';
 updater = new Updater({
-  feedUrl: process.env.TEAMCODE_UPDATE_URL || pkg.teamcode?.updateUrl,
+  feedUrl: siteUrl,
   currentVersion: process.env.TEAMCODE_FAKE_VERSION || app.getVersion(),
   dir: path.join(userData, 'updates'),
-  enabled: app.isPackaged || !!process.env.TEAMCODE_UPDATE_URL,
+  enabled: app.isPackaged || !!process.env.TEAMCODE_SITE_URL,
   canInstall: app.isPackaged,
   onState: (state) => send('tc:update', state),
 });
 
-app.whenReady().then(() => { createWindow(); updater.start(); });
+account = new Account({ siteUrl, config, saveConfig, onState: (state) => send('tc:account', state) });
+
+app.whenReady().then(() => { createWindow(); updater.start(); account.refresh(); });
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
 app.on('activate', () => { if (!win) createWindow(); });
 app.on('before-quit', async (e) => {

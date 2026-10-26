@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Your account · TeamCode</title>
+  <meta name="robots" content="noindex">
+  <link rel="icon" href="/img/icon.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/css/site.css">
+</head>
+<body data-page="account">
+  <nav><div class="wrap">
+    <a class="brand" href="/"><svg viewBox="0 0 24 24" aria-hidden="true"><rect width="24" height="24" rx="5" fill="var(--ink)"/><path d="M7.5 6.5v11M12 6.5v6.5" stroke="var(--ink-text)" stroke-width="2.4" stroke-linecap="round"/><path d="M16.5 6.5v9" stroke="var(--signal)" stroke-width="2.4" stroke-linecap="round"/></svg>TeamCode</a>
+    <div class="right" id="nav-account"><a href="/#download">Download</a><a href="/login">Sign in</a></div>
+  </div></nav>
+  <main>
+    <section class="page"><div class="wrap">
+      <div class="label">Account</div>
+      <h1 id="hello">Your account</h1>
+      <div class="msg" id="msg" role="alert" style="max-width:760px;margin-bottom:20px"></div>
+      <div class="rows">
+        <div class="rowx"><div><h2>Profile</h2><p class="sub">How you appear to your team.</p></div>
+          <div><div id="profile-name" style="font-weight:600"></div><div id="profile-email" class="sub"></div></div></div>
+        <div class="rowx"><div><h2>Desktop app</h2><p class="sub">Sign in from the app with Account, Sign in. It opens this site to confirm.</p></div>
+          <div><a class="btn" href="/#download">Download TeamCode</a></div></div>
+        <div class="rowx"><div><h2>Password</h2><p class="sub">Changing it signs out your other browsers and apps.</p></div>
+          <form id="pw-form" novalidate>
+            <label>Current password<input name="current" type="password" autocomplete="current-password" maxlength="200" required></label>
+            <label>New password <span class="hint">At least 10 characters</span><input name="password" type="password" autocomplete="new-password" minlength="10" maxlength="200" required></label>
+            <div><button class="btn" type="submit">Change password</button></div>
+          </form></div>
+        <div class="rowx"><div><h2>Where you're signed in</h2><p class="sub">Browsers and apps using your account.</p></div>
+          <div><ul class="list" id="sessions"></ul><div style="margin-top:14px;display:flex;gap:10px;flex-wrap:wrap"><button class="btn" id="signout" type="button">Sign out</button><button class="btn" id="signout-all" type="button">Sign out everywhere</button></div></div></div>
+        <div class="rowx"><div><h2>Delete account</h2><p class="sub">Removes your account and signs you out everywhere. This can't be undone.</p></div>
+          <form id="del-form" novalidate>
+            <label>Password<input name="password" type="password" autocomplete="current-password" maxlength="200" required></label>
+            <div><button class="btn danger" type="submit">Delete my account</button></div>
+          </form></div>
+      </div>
+    </div></section>
+  </main>
+  <footer><div class="wrap"><span class="grow">TeamCode</span><a href="/terms">Terms</a><a href="/privacy">Privacy</a></div></footer>
+  <script src="/js/account.js"></script>
+</body>
+</html>

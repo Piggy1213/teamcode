@@ -228,18 +228,25 @@ scripts/       smoke test, icon generator
   `npm version patch && git push --follow-tags` → tests run, then Windows (`.exe`) and macOS (`.dmg`, Apple Silicon + Intel) installers are attached to a GitHub release.
 - **Website** (`website/`) is a zero-dependency Node server for Railway. It shows the landing page and serves the latest release's installers via `/download/windows`, `/download/mac-arm64`, `/download/mac-x64` (redirects to short-lived signed GitHub URLs).
   On Railway it reads releases from the repo it deploys from. Set `GITHUB_TOKEN=<fine-grained token with read-only Contents access>` only if the repo is private; set `GITHUB_REPO=owner/name` to read releases from a different repo.
-- **Auto-update**: the app checks the website for a newer release 15 seconds after launch and then every 4 hours. It downloads the installer in the background, verifies its size and SHA-256, and installs it on **Restart** (sidebar) or when the app quits. Windows runs the installer silently; macOS swaps the app in `/Applications` (the app must live there). Turn it on by setting `teamcode.updateUrl` in `package.json` to your website's URL before you tag a release. Builds without it don't check. To try it in development: `TEAMCODE_UPDATE_URL=http://localhost:3000 TEAMCODE_FAKE_VERSION=0.0.1 npm start` (downloads only; it never installs over the dev Electron).
+- **Auto-update**: the app checks the website for a newer release 15 seconds after launch and then every 4 hours. It downloads the installer in the background, verifies its size and SHA-256, and installs it on **Restart** (sidebar) or when the app quits. Windows runs the installer silently; macOS swaps the app in `/Applications` (the app must live there). Turn it on by setting `teamcode.siteUrl` in `package.json` to your website's URL before you tag a release (the same setting turns on accounts in the app). Builds without it don't check. To try it in development: `TEAMCODE_SITE_URL=http://localhost:3000 TEAMCODE_FAKE_VERSION=0.0.1 npm start` (downloads only; it never installs over the dev Electron).
+- **Accounts** live on the website (Postgres). People sign up at `/signup`; the desktop app signs in through the browser with a one-time code (Settings → Account), so it never handles passwords. Security: scrypt password hashes, session tokens stored only as SHA-256, per-IP and per-email rate limits, lockout after 8 failed sign-ins, same-origin checks on cookie-authenticated writes, strict CSP and security headers, 16 KB request bodies. Website tests: `cd website && npm test`.
 - Installers are not code-signed yet: Windows shows a SmartScreen prompt and macOS needs `xattr -cr /Applications/TeamCode.app` (the site explains both). Signing needs a Windows code-signing certificate and an Apple Developer ID.
 
 ### Deploy on Railway
 
 1. In Railway: **New Project → Deploy from GitHub repo** and pick this repo. No settings needed: the root `railway.json` builds `website/Dockerfile` and health-checks `/health`.
 2. **Settings → Networking → Generate Domain** to get a public URL.
-3. If the repo is private, add the `GITHUB_TOKEN` variable so download buttons work.
+3. For accounts, add Postgres to the project (**+ New → Database → PostgreSQL**). The site creates its tables on start.
+4. On the website service, set these variables:
+   - `DATABASE_URL` = `${{Postgres.DATABASE_URL}}` (Railway fills it in from the database)
+   - `GITHUB_TOKEN` = a fine-grained token with read-only Contents access to this repo (needed while the repo is private)
+   - `PUBLIC_URL` = your site's address, e.g. `https://teamcode-production.up.railway.app` (optional, tightens the cross-site check)
+5. Put the same address in `teamcode.siteUrl` in `package.json` so app builds use it for updates and sign-in.
+6. Fill in the `[Business name]`, `[contact email]` and governing-law placeholders in `website/public/terms.html` and `privacy.html`, and have someone qualified review them.
 
 Railway only lists repos its GitHub app can see. If this repo doesn't show up, install the Railway app on the account that owns the repo (github.com/apps/railway-app → Configure) and give it access.
 
 | Service | Railway config file | Variables |
 | --- | --- | --- |
-| Website | `railway.json` (default) | `GITHUB_TOKEN` if the repo is private; optional `GITHUB_REPO` |
+| Website | `railway.json` (default) | `DATABASE_URL`, `GITHUB_TOKEN` if the repo is private; optional `PUBLIC_URL`, `GITHUB_REPO` |
 | Team workspace server (optional, for remote teams) | set **Settings → Config-as-code → Railway config file** to `server/railway.json` | `TEAMCODE_WORKSPACE`, `TEAMCODE_NAME`, `TEAMCODE_TOKEN` (random secret), plus a volume mounted at `/data`. The invite code is printed in the deploy logs. |

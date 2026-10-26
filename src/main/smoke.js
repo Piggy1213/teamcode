@@ -81,7 +81,7 @@ async function run(win, { handlers, getSession, config }) {
     await shot('12-new-task');
     await js('closeModal(); A.invite();');
     await shot('13-invite');
-    if (process.env.TEAMCODE_UPDATE_URL) {
+    if (process.env.TEAMCODE_SITE_URL) {
       await js('closeModal(); api("update:check").then((u) => { S.update = u; S.view = "settings"; renderNow(); })');
       await sleep(2500);
       await js('renderNow()');

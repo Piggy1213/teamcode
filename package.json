@@ -5,7 +5,7 @@
   "description": "Code together with your team: everyone's Claude Code sees everyone's changes in real time.",
   "main": "src/main/main.js",
   "teamcode": {
-    "updateUrl": ""
+    "siteUrl": ""
   },
   "author": "TeamCode",
   "license": "MIT",
@@ -89,7 +89,7 @@
     "publish": [
       {
         "provider": "github",
-        "owner": "lbakes111",
+        "owner": "Piggy1213",
         "repo": "teamcode",
         "releaseType": "release"
       }
@@ -97,7 +97,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/lbakes111/teamcode.git"
+    "url": "https://github.com/Piggy1213/teamcode.git"
   },
-  "homepage": "https://github.com/lbakes111/teamcode"
+  "homepage": "https://github.com/Piggy1213/teamcode"
 }

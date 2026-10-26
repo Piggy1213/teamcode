@@ -14,7 +14,7 @@ const MOD = isMac ? '⌘' : 'Ctrl';
 const S = {
   init: null, project: null, view: 'agents', state: null, events: [], presence: [], runtime: {}, status: 'offline', sync: null,
   logs: {}, drawer: null, review: { sel: null, tab: 'tasks', data: {}, busy: null }, taskMode: 'board', showClosed: false,
-  activity: { filter: 'all', q: '' }, ctxTab: 'contracts', gitInfo: null, needsLogin: false, update: null,
+  activity: { filter: 'all', q: '' }, ctxTab: 'contracts', gitInfo: null, needsLogin: false, update: null, account: null,
 };
 
 // ---------- helpers ----------
@@ -119,6 +119,15 @@ function claudeBanner() {
   return `<div class="banner ok">${icon('check')}<div class="spacer"><b>Claude Code ready</b> <span class="muted mono">${esc(c.version || '')}</span></div><button class="btn sm ghost" data-act="login">Switch account</button></div>`;
 }
 
+// Account line for the welcome screen.
+function accountLine() {
+  const a = S.account;
+  if (!a?.available) return '';
+  if (a.user) return `<div class="row small">${avatar(a.user.name, 'sm')}<span class="spacer ellipsis">Signed in as <b>${esc(a.user.name)}</b></span><button class="btn sm ghost" data-act="view-account">Account</button></div>`;
+  if (a.pending) return `<div class="row small"><span class="spinner"></span><span class="spacer">Approve <code>${esc(a.pending.userCode)}</code> in your browser</span><button class="btn sm ghost" data-act="account-cancel">Cancel</button></div>`;
+  return `<div class="row small"><span class="spacer muted">Sign in to sync your name across computers.</span><button class="btn sm" data-act="account-login">${icon('user')}Sign in</button></div>`;
+}
+
 // Update notice for the sidebar and welcome screen; empty unless a download is under way or ready.
 function updateNotice() {
   const u = S.update;
@@ -139,6 +148,7 @@ function welcome() {
       <div class="col" style="gap:12px"><h1>One codebase. Your team and all its agents.</h1>
       <p>Everyone runs their own Claude Code. TeamCode keeps the agents aware of each other, syncs every save, and holds work for review before it lands.</p></div>
       <div class="side-foot">
+        ${accountLine()}
         ${updateNotice()}
         ${claudeBanner()}
         <div class="small muted">The host's computer runs the shared workspace. For an always-on team, run <code>npm run server</code> on a server.</div>
@@ -536,6 +546,18 @@ function viewFiles() {
 }
 
 // ---------- Settings ----------
+function accountSetting() {
+  const a = S.account;
+  const site = esc(a.siteUrl);
+  if (a.user) return `<div class="row">${avatar(a.user.name)}<div class="spacer"><b>${esc(a.user.name)}</b><div class="small muted">${esc(a.user.email)}</div></div></div>
+    <div class="row"><a class="btn" href="${site}/account" target="_blank" rel="noopener">${icon('link')}Manage account</a><button class="btn ghost" data-act="account-logout">Sign out</button></div>`;
+  if (a.pending) return `<div class="small">Your browser opened TeamCode's sign-in page. Check it shows this code, then approve:</div>
+    <div class="row"><code style="font-size:16px;padding:4px 10px;letter-spacing:.08em">${esc(a.pending.userCode)}</code><span class="spinner"></span><span class="muted small">Waiting for approval…</span></div>
+    <div class="row"><a class="btn" href="${esc(a.pending.url)}" target="_blank" rel="noopener">Open the page again</a><button class="btn ghost" data-act="account-cancel">Cancel</button></div>`;
+  return `<div class="small muted">Not signed in.</div>
+    <div class="row"><button class="btn primary" data-act="account-login">${icon('user')}Sign in with browser</button><a class="btn ghost" href="${site}/signup" target="_blank" rel="noopener">Create an account</a></div>`;
+}
+
 function updatesSetting() {
   const u = S.update || { status: 'disabled', current: S.init.version };
   const line = {
@@ -560,6 +582,7 @@ function viewSettings() {
   if (!g) api('project:gitInfo').then((x) => { S.gitInfo = x; render(); }).catch(() => { S.gitInfo = { repo: false, error: true }; });
   const sec = (title, text, body) => `<div class="set-sec"><div><h3>${title}</h3><p>${text}</p></div><div class="col">${body}</div></div>`;
   return `<div class="view" data-scroll="settings"><div class="settings">
+    ${S.account?.available ? sec('Account', 'Your TeamCode account. Sign-in happens in your browser, so the app never sees your password.', accountSetting()) : ''}
     ${sec('You', 'How your name appears to the team and in agent activity.', `<div class="row"><input id="set-name" value="${esc(me().name)}" placeholder="Your name"><button class="btn" data-act="set-name">Save</button></div>`)}
     ${sec('Claude Code', 'The CLI TeamCode runs your agents with.', `
       <div class="banner ${c.path ? 'ok' : 'warn'}">${icon(c.path ? 'check' : 'warn')}<div class="spacer"><b>${c.path ? esc(c.version || 'Found') : 'Not found'}</b><div class="small muted mono ellipsis">${esc(c.path || 'npm i -g @anthropic-ai/claude-code')}</div></div></div>
@@ -987,6 +1010,10 @@ A['external-agent'] = async () => {
 A['init-git'] = async () => { const g = await run(() => api('project:initGit'), 'Git repository initialized'); if (g) { S.gitInfo = g; render(); } };
 A.checkpoint = async () => { const r = await run(() => api('project:checkpoint')); toast(r ? `Committed ${String(r).slice(0, 8)}` : 'Nothing to commit', 'ok'); S.gitInfo = null; render(); };
 
+A['account-login'] = async (d, el) => { el.disabled = true; const a = await run(() => api('account:login')); if (a) S.account = a; render(); };
+A['account-cancel'] = async () => { S.account = await run(() => api('account:cancel')) || S.account; render(); };
+A['account-logout'] = async () => { S.account = await run(() => api('account:logout'), 'Signed out') || S.account; render(); };
+A['view-account'] = () => { if (S.project) { S.view = 'settings'; render(); } else window.open(`${S.account.siteUrl}/account`); };
 A['update-install'] = async (d, el) => { el.disabled = true; await run(() => api('update:install')); };
 A['update-check'] = async (d, el) => {
   el.disabled = true;
@@ -1038,6 +1065,12 @@ window.tc.on('tc:runtime', (r) => { S.runtime = r; render(); });
 window.tc.on('tc:toast', (t) => toast(t.text, t.kind));
 window.tc.on('tc:needsLogin', () => { S.needsLogin = true; render(); });
 window.tc.on('tc:update', (u) => { S.update = u; render(); });
+window.tc.on('tc:account', (a) => {
+  const signedIn = !S.account?.user && a.user;
+  S.account = a;
+  if (signedIn) { S.init.user = { ...S.init.user, name: a.user.name }; toast(`Signed in as ${a.user.name}`, 'ok'); }
+  render();
+});
 window.tc.on('tc:agentLog', ({ agentId, entry }) => {
   (S.logs[agentId] ||= []).push(entry);
   if (S.drawer?.kind === 'agent' && S.drawer.id === agentId) renderDrawer();
@@ -1049,6 +1082,7 @@ setInterval(() => { if (S.project && !$('#modal-root').innerHTML) render(); }, 3
 (async () => {
   S.init = await api('app:init');
   S.update = S.init.update;
+  S.account = S.init.account;
   if (S.init.current) {
     S.project = S.init.current;
     const st = await api('ws:state');

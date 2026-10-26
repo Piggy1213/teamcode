@@ -2,12 +2,19 @@
   "name": "teamcode-website",
   "version": "1.0.0",
   "private": true,
-  "description": "Download site for TeamCode",
+  "description": "TeamCode website: landing page, accounts, downloads and app updates",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "node --test test/*.test.js"
   },
   "engines": {
     "node": ">=20"
+  },
+  "dependencies": {
+    "pg": "^8.23.1"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.5.11"
   }
 }

@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Create an account · TeamCode</title>
+  <meta name="robots" content="noindex">
+  <link rel="icon" href="/img/icon.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/css/site.css">
+</head>
+<body data-page="signup">
+  <nav><div class="wrap">
+    <a class="brand" href="/"><svg viewBox="0 0 24 24" aria-hidden="true"><rect width="24" height="24" rx="5" fill="var(--ink)"/><path d="M7.5 6.5v11M12 6.5v6.5" stroke="var(--ink-text)" stroke-width="2.4" stroke-linecap="round"/><path d="M16.5 6.5v9" stroke="var(--signal)" stroke-width="2.4" stroke-linecap="round"/></svg>TeamCode</a>
+    <div class="right" id="nav-account"><a href="/#download">Download</a><a href="/login">Sign in</a></div>
+  </div></nav>
+  <main>
+    <section class="auth"><div class="card">
+      <div><div class="label">Create an account</div><h1>Join TeamCode.</h1></div>
+      <p>One account for the website and the desktop app.</p>
+      <div class="msg err" id="msg" role="alert"></div>
+      <form id="form" novalidate>
+        <label>Name<input name="name" autocomplete="name" maxlength="60" required></label>
+        <label>Email<input name="email" type="email" autocomplete="email" maxlength="254" required></label>
+        <label>Password <span class="hint">At least 10 characters</span><input name="password" type="password" autocomplete="new-password" minlength="10" maxlength="200" required></label>
+        <label class="check"><input name="agree" type="checkbox" required><span>I agree to the <a href="/terms" target="_blank">Terms</a> and have read the <a href="/privacy" target="_blank">Privacy Policy</a>.</span></label>
+        <button class="btn primary block" type="submit">Create account</button>
+      </form>
+      <div class="alt">Already have an account? <a href="/login" id="alt-link">Sign in</a></div>
+    </div></section>
+  </main>
+  <footer><div class="wrap"><span class="grow">TeamCode</span><a href="/terms">Terms</a><a href="/privacy">Privacy</a></div></footer>
+  <script src="/js/account.js"></script>
+</body>
+</html>
