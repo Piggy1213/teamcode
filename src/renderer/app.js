@@ -1150,11 +1150,12 @@ window.tc.on('tc:agentStarted', async ({ agentId, taskId }) => {
 });
 window.tc.on('tc:account', (a) => {
   const signedIn = !S.account?.user && a.user;
+  const flowEnded = !!S.account?.pending && !a.pending;
   S.account = a;
   if (signedIn) { S.init.user = { ...S.init.user, name: a.user.name }; toast(`Signed in as ${a.user.name}`, 'ok'); loadCloudProjects(); }
   // The hosting dialog depends on being signed in: redraw it when that changes.
   const hosting = $('[data-act="open-go"]');
-  if (hosting && (signedIn || !a.pending)) chooseHosting(hosting.dataset.root);
+  if (hosting && (signedIn || flowEnded)) chooseHosting(hosting.dataset.root);
   render();
 });
 window.tc.on('tc:agentLog', ({ agentId, entry }) => {

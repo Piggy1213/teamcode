@@ -170,9 +170,10 @@ function writeClaudeHooks(root, hookCmd) {
 }
 
 // Keeps a TeamCode-created .claude/settings.local.json out of git (Claude Code does the same for its own).
+// Best effort: skipped when .git is a file (a linked worktree or submodule keeps its info/ elsewhere).
 function gitExclude(root, rel) {
   const f = path.join(root, '.git', 'info', 'exclude');
-  if (!fs.existsSync(path.join(root, '.git'))) return;
+  try { if (!fs.statSync(path.join(root, '.git')).isDirectory()) return; } catch { return; }
   let cur = '';
   try { cur = fs.readFileSync(f, 'utf8'); } catch { /* no exclude file yet */ }
   if (cur.split(/\r?\n/).includes(rel)) return;
@@ -185,18 +186,19 @@ async function linkClaudeCode(s) {
   await claudeCli(['mcp', 'remove', 'teamcode', '--scope', 'local'], s.project.root).catch(() => {});
   await claudeCli(['mcp', 'add-json', 'teamcode', JSON.stringify(link.server), '--scope', 'local'], s.project.root);
   writeClaudeHooks(s.project.root, link.hookCmd);
-  gitExclude(s.project.root, '.claude/settings.local.json');
   s.project.claudeLinked = true;
   s.project.claudeLinkedServer = JSON.stringify(link.server);
   saveConfig();
+  try { gitExclude(s.project.root, '.claude/settings.local.json'); } catch { /* optional */ }
 }
 
 // Runs the Claude Code CLI (e.g. `claude mcp add-json ...`) in the project folder.
 async function claudeCli(args, cwd) {
   const cli = config.settings.claudePath;
-  if (!cli || !isRunnable(cli) || isDesktopApp(cli)) throw new Error('Claude Code isn\'t set up. Open Settings, Claude Code, and press Detect.');
+  const setup = (msg) => Object.assign(new Error(msg), { setup: true });
+  if (!cli || !isRunnable(cli) || isDesktopApp(cli)) throw setup('Claude Code isn\'t set up. Open Settings, Claude Code, and press Detect.');
   const spec = spawnSpec(cli, findNode());
-  if (spec.shell) throw new Error('Run the command below in a terminal instead (this Claude Code install needs a shell).');
+  if (spec.shell) throw setup('This Claude Code install needs a shell. Use Set up by hand and run the command in a terminal.');
   return new Promise((resolve, reject) => {
     execFile(spec.command, [...spec.prefix, ...args], { cwd, timeout: 30000, windowsHide: true }, (err, stdout, stderr) => {
       if (err) reject(new Error(String(stderr || stdout || err.message).trim().split('\n').slice(-3).join(' ')));
@@ -354,14 +356,15 @@ const handlers = {
     return {
       linked: !!s.project.claudeLinked, root: s.project.root, local: s.project.role === 'host',
       // No embedded JSON, so the same command works in cmd, PowerShell and POSIX shells.
-      command: `claude mcp add --scope local${link.server.env ? ' -e ELECTRON_RUN_AS_NODE=1' : ''} teamcode -- ${[link.server.command, ...link.server.args].map((a) => `"${a}"`).join(' ')}`,
+      command: `claude mcp add --scope local teamcode${link.server.env ? ' -e ELECTRON_RUN_AS_NODE=1' : ''} -- ${[link.server.command, ...link.server.args].map((a) => `"${a}"`).join(' ')}`,
       server: JSON.stringify(link.server, null, 2), hooks: JSON.stringify(hooks, null, 2),
     };
   },
   'claude:link': async () => { await linkClaudeCode(requireSession()); return true; },
   'claude:unlink': async () => {
     const s = requireSession();
-    await claudeCli(['mcp', 'remove', 'teamcode', '--scope', 'local'], s.project.root).catch(() => {});
+    // "Not found" is fine (already removed); a Claude Code that can't run is not: say so instead of pretending.
+    await claudeCli(['mcp', 'remove', 'teamcode', '--scope', 'local'], s.project.root).catch((e) => { if (e.setup) throw e; });
     writeClaudeHooks(s.project.root, null);
     s.project.claudeLinked = false;
     delete s.project.claudeLinkedServer;

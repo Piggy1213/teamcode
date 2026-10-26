@@ -73,6 +73,7 @@ class ProjectSession {
 
   async stop() {
     this.agents?.stopAll();
+    this.agents?.dispose();
     await this.sync?.stop();
     this.conn?.close();
   }

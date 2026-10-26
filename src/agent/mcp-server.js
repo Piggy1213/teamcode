@@ -152,7 +152,7 @@ const TOOLS = [
     run: async (a) => {
       if (!cfg.userId) throw new Error('This connection is not linked to a TeamCode user. Add it from the TeamCode app (Settings, Claude Code) to start tasks on your computer.');
       const before = await agentCall(cfg, 'updateTask', { taskId: a.task_id, runner: cfg.userId, runnerName: cfg.userName || cfg.name, autoStart: true });
-      if (before.status === 'running') return `"${before.title}" is already running.`;
+      if (before.status === 'running' || before.status === 'blocked') return `"${before.title}" is ${before.status} with another agent. It will start here if that agent releases it.`;
       // Reopening also marks the task as changed, so the app retries it even if an earlier start failed.
       const t = await agentCall(cfg, 'reopenTask', { taskId: a.task_id });
       return `"${t.title}" will start on ${cfg.userName ? `${cfg.userName}'s` : 'your'} computer ${t.status === 'ready' ? 'in a moment' : 'when its dependencies are done'}. The TeamCode app needs to be open.`;

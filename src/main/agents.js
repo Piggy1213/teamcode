@@ -50,6 +50,11 @@ class AgentManager extends EventEmitter {
 
   handedOffTasks() { return new Set(Object.values(this.meta).filter((m) => m.handedOff).map((m) => m.taskId)); }
 
+  // Closing or switching projects: stop keep-alive timers (the next open resumes them from meta).
+  dispose() {
+    for (const id of [...this.handoffBeats.keys()]) this._stopKeepAlive(id);
+  }
+
   _saveMeta() {
     fs.mkdirSync(this.dataDir, { recursive: true });
     fs.writeFileSync(this.metaFile, JSON.stringify(this.meta, null, 1));
@@ -314,7 +319,7 @@ class AgentManager extends EventEmitter {
         // Back to the queue, but not straight back into an agent: wait for someone to start it again.
         if (task && ['running', 'blocked'].includes(task.status)) {
           await this.conn.call('updateTask', { taskId: m.taskId, autoStart: false }).catch(() => {});
-          await this.conn.call('reopenTask', { taskId: m.taskId }).catch(() => {});
+          await this.conn.call('reopenTask', { taskId: m.taskId, force: true }).catch(() => {});
         }
         return;
       }
@@ -366,6 +371,7 @@ class AgentManager extends EventEmitter {
 
   async message(agentId, text) {
     if (this.meta[agentId]?.handedOff) throw new Error('This agent is continuing in Claude Code. Message it there.');
+    if (this.meta[agentId] && this.handedOffTasks().has(this.meta[agentId].taskId)) throw new Error('Another agent is continuing this task in Claude Code.');
     let live = this.running.get(agentId);
     if (live?.exited) { await live.done; live = this.running.get(agentId); }
     if (live && !live.exited) {
@@ -402,11 +408,14 @@ class AgentManager extends EventEmitter {
     const m = this.meta[agentId];
     if (!m) throw new Error('This agent was not started on this computer');
     if (m.handedOff) throw new Error('This agent is already continuing in Claude Code');
+    if (this.handedOffTasks().has(m.taskId)) throw new Error('Another agent is already continuing this task in Claude Code.');
+    if ([...this.running.entries()].some(([id, r]) => id !== agentId && r.taskId === m.taskId && !r.exited)) throw new Error('Another agent is running this task. Stop it first.');
     if (!isWin && process.platform !== 'darwin') throw new Error('Open in Claude Code works on Mac and Windows');
     await this.checkClaude();
     if (!m.sessionId) throw new Error('This agent has no conversation yet. Wait until it has started, then try again.');
     if (!fs.existsSync(m.cwd)) throw new Error(`This agent's folder no longer exists (${m.cwd}).`);
-    const task = (await this.conn.call('snapshot').catch(() => null))?.tasks?.[m.taskId] || this.getState()?.tasks?.[m.taskId];
+    const freshTask = async () => (await this.conn.call('snapshot').catch(() => null))?.tasks?.[m.taskId] || this.getState()?.tasks?.[m.taskId];
+    let task = await freshTask();
     if (task && ['done', 'cancelled'].includes(task.status)) throw new Error('This task is already finished.');
 
     const run = this.running.get(agentId);
@@ -416,6 +425,11 @@ class AgentManager extends EventEmitter {
       killTree(run.child);
       await Promise.race([run.done, new Promise((r) => setTimeout(r, 10000))]);
     }
+    // The run may have just finished, failed or been stopped: decide from the task as it is now.
+    task = await freshTask();
+    if (task && ['done', 'cancelled'].includes(task.status)) throw new Error('This task finished before it could be handed over.');
+    const theirs = task?.assignee && task.assignee !== agentId && this.getState()?.agents?.[task.assignee];
+    if (theirs && ['starting', 'working', 'idle', 'waiting', 'blocked'].includes(theirs.status)) throw new Error(`${theirs.name} is working on this task now.`);
     // A failed or stopped agent takes its task back first, the same way a follow-up message does.
     if (!task || !['running', 'blocked'].includes(task.status)) {
       await this.conn.call('registerAgent', { agentId, name: m.name, client: 'Claude Code', taskId: m.taskId, userId: this.user.id, mode: m.mode, branch: m.branch, cwd: m.cwd });
@@ -434,7 +448,7 @@ class AgentManager extends EventEmitter {
       // Couldn't open a window: release the task like a Stop would.
       await this.conn.call('agentExited', { agentId, outcome: 'stopped' }).catch(() => {});
       await this.conn.call('updateTask', { taskId: m.taskId, autoStart: false }).catch(() => {});
-      await this.conn.call('reopenTask', { taskId: m.taskId }).catch(() => {});
+      await this.conn.call('reopenTask', { taskId: m.taskId, force: true }).catch(() => {});
       this.emit('runtime');
       throw e;
     }
@@ -451,18 +465,19 @@ class AgentManager extends EventEmitter {
   async finishHandoff(agentId) {
     const m = this.meta[agentId];
     if (!m?.handedOff) throw new Error('This agent is not in Claude Code');
+    // If any step fails, the handoff stays in place so Send for review can simply be pressed again.
     try {
       const task = (await this.conn.call('snapshot').catch(() => null))?.tasks?.[m.taskId] || this.getState()?.tasks?.[m.taskId];
       const summary = clip(task?.summary || 'Finished in Claude Code', 1200);
       if (task && !['done', 'cancelled'].includes(task.status)) await this.conn.call('completeTask', { agentId, taskId: m.taskId, summary });
       await this._requestReview(agentId, m, task, summary);
       await this.conn.call('agentExited', { agentId, outcome: 'done' }).catch(() => {});
-      this.log(agentId, 'system', 'Finished in Claude Code. Changes sent for review.');
-    } finally {
       m.handedOff = false;
       m.finishedAt = Date.now();
       this._saveMeta();
       this._stopKeepAlive(agentId);
+      this.log(agentId, 'system', 'Finished in Claude Code. Changes sent for review.');
+    } finally {
       this.emit('runtime');
     }
     return true;

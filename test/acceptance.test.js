@@ -569,8 +569,9 @@ test('personal Claude Code hooks stand down inside an agent TeamCode launched', 
 
 test('handing an agent to Claude Code protects its task until Send for review', async () => {
   const fake = path.join(__dirname, 'fixtures', 'fake-claude.js');
-  if (process.platform !== 'win32') fs.chmodSync(fake, 0o755);
-  else return; // the handoff script itself is exercised on Mac; Windows CI only checks the protections elsewhere
+  // Handoff opens a Terminal (Mac) or console (Windows) script; Linux CI has neither.
+  if (process.platform !== 'darwin') return;
+  fs.chmodSync(fake, 0o755);
   const toasts = [];
   const { W, session } = runnerSession('handoff', fake, toasts);
   await session.start();

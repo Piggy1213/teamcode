@@ -29,6 +29,9 @@ jobs:
       - run: npm ci
       - run: git config --global user.name ci && git config --global user.email ci@example.com
       - run: npm test
+      - name: Website tests (accounts, security, cloud workspaces)
+        working-directory: website
+        run: npm ci && npm test
 
   release:
     needs: test
