@@ -265,7 +265,11 @@ class ProjectSession {
       try {
         if (c.beforeVersion) await this.call('fileRevert', { path: c.path, version: c.beforeVersion });
         else fs.rmSync(path.join(this.project.root, c.path), { force: true }); // file was created by the task; the watcher syncs the delete
-      } catch (e) { failed.push({ path: c.path, reason: e.message }); } // keep going: one file mustn't stop the rest
+      } catch (e) {
+        // The old version is gone for good (trimmed from history): retrying can't help, so it's skipped, not failed.
+        if (e.code === 'gone' || /version not found/i.test(e.message)) skipped.push({ path: c.path, reason: `v${c.beforeVersion} is no longer stored` });
+        else failed.push({ path: c.path, reason: e.message }); // keep going: one file mustn't stop the rest
+      }
     }
     // Only a complete revert (apart from files others have since changed) is recorded; otherwise it can be retried.
     if (!failed.length) await this.call('markReverted', { taskId });

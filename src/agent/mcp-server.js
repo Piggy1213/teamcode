@@ -158,9 +158,11 @@ const TOOLS = [
       const owner = current.assignee && snap.agents?.[current.assignee];
       const busy = ['running', 'blocked'].includes(current.status) && owner && ['starting', 'working', 'idle', 'waiting', 'blocked', 'stale'].includes(owner.status) && owner.task?.id === current.id;
       if (busy) return `"${current.title}" is ${current.status} with ${current.assigneeName || 'another agent'}. It can be started here once that agent stops.`;
-      // Reopen first: if another agent grabbed it meanwhile this fails and nothing has been changed.
-      await agentCall(cfg, 'reopenTask', { taskId: a.task_id });
-      const t = await agentCall(cfg, 'updateTask', { taskId: a.task_id, runner: cfg.userId, runnerName: cfg.userName || cfg.name, autoStart: true });
+      // One step: reopened and handed to this person's computer together, so no other computer can start it
+      // in between. If another agent grabbed it meanwhile this fails and nothing has been changed.
+      const runner = { runner: cfg.userId, runnerName: cfg.userName || cfg.name, autoStart: true };
+      let t = await agentCall(cfg, 'reopenTask', { taskId: a.task_id, ...runner });
+      if (t.runner !== cfg.userId || !t.autoStart) t = await agentCall(cfg, 'updateTask', { taskId: a.task_id, ...runner }); // older server
       return `"${t.title}" will start on ${cfg.userName ? `${cfg.userName}'s` : 'your'} computer ${t.status === 'ready' ? 'in a moment' : 'when its dependencies are done'}. The TeamCode app needs to be open.`;
     },
   },

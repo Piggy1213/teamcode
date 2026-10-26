@@ -167,9 +167,11 @@ test('a full hosted project refuses growth but can still finish, review and clea
   W.call('startTask', { taskId: t.id, agentId: 'agt_f' }, user);
   let refused = null;
   for (let i = 0; i < 60 && !refused; i++) {
-    try { W.call('integrationChecked', { taskId: t.id, conflicts: [], risks: [{ kind: 'x', message: 'y'.repeat(30000) }] }, user); W.saveNow(); } catch (e) { refused = e; }
+    try { W.call('createTask', { title: `t${i}`, description: 'y'.repeat(30000) }, user); W.saveNow(); } catch (e) { refused = e; }
   }
   assert.match(refused.message, /storage limit/, 'record growth stops at the cap');
+  // Re-checking integration replaces the task's result rather than adding records, so it keeps working.
+  W.call('integrationChecked', { taskId: t.id, conflicts: [], risks: [] }, user);
   assert.throws(() => W.call('registerAgent', { agentId: 'agt_n', name: 'n'.repeat(70000) }, user), /too large/);
   assert.equal(W.call('completeTask', { agentId: 'agt_f', summary: 'ok' }, user).status, 'done', 'finishing still works');
   W.call('reviewDecision', { taskId: t.id, decision: 'approve' }, user);
@@ -295,4 +297,217 @@ test('a laptop back from sleep resumes its task if nobody took it; claiming anot
   assert.equal(W.state.tasks[t1.id].status, 'ready', 'the first task went back to the queue');
   assert.equal(W.state.agents.agt_w.taskId, t2.id);
   c.close();
+});
+
+const sha = (s) => require('crypto').createHash('sha256').update(s).digest('hex');
+const b64 = (s) => Buffer.from(s).toString('base64');
+const goOffline = (W, id) => { W.state.agents[id].lastSeen = Date.now() - 30 * 60 * 1000; W.sweep(); W.sweep(); };
+
+test('history trimming keeps the version a task would Revert to and the base of an open conflict', () => {
+  const c = new Coordinator({ dataDir: tmp() });
+  const W = c.ensureWorkspace('keep-ws', { name: 'K' });
+  W.call('filePut', { path: 'a.js', baseVersion: 0, contentB64: b64('original') }, user);
+  const t = W.call('createTask', { title: 'Edit a', mode: 'shared' }, user);
+  W.call('registerAgent', { agentId: 'agt_k', name: 'K', taskId: t.id }, user);
+  W.call('startTask', { taskId: t.id, agentId: 'agt_k' }, user);
+  W.call('fileEdited', { agentId: 'agt_k', path: 'a.js', hash: sha('k') }, user);
+  W.call('filePut', { path: 'a.js', baseVersion: 1, contentB64: b64('k') }, user);
+  const conflict = W.call('filePut', { path: 'a.js', baseVersion: 2, contentB64: b64('stale base') }, user);
+  W.call('filePut', { path: 'a.js', baseVersion: 2, contentB64: b64('base of a conflict') }, { user: { id: 'u2', name: 'Bo' } });
+  assert.equal(conflict.unchanged || conflict.ok, true);
+  const base = W.state.files['a.js'].version;
+  const r = W.call('filePut', { path: 'a.js', baseVersion: base - 1, contentB64: b64('conflicting') }, user);
+  assert.equal(r.ok, false, 'a sync conflict is open');
+  for (let i = 0; i < 40; i++) W.call('filePut', { path: 'a.js', baseVersion: W.state.files['a.js'].version, contentB64: b64(`edit ${i}`) }, { user: { id: 'u2', name: 'Bo' } });
+  const versions = W.state.files['a.js'].history.map((h) => h.version);
+  assert.ok(versions.includes(1), 'the version before the task is kept');
+  assert.ok(versions.includes(W.state.conflicts[r.conflict].baseVersion), 'the conflict base is kept');
+  assert.ok(W.call('conflictData', { conflictId: r.conflict }, user).baseB64, 'the conflict can still be merged');
+  assert.equal(Buffer.from(W.call('fileGet', { path: 'a.js', version: 1 }, user).contentB64, 'base64').toString(), 'original');
+  assert.throws(() => W.call('fileRevert', { path: 'a.js', version: 3 }, user), (e) => e.code === 'gone');
+  c.close();
+});
+
+test('an agent is credited only for its own person\'s fresh sync of its edit, never someone else\'s version', () => {
+  const c = new Coordinator({ dataDir: tmp() });
+  const W = c.ensureWorkspace('credit2-ws', { name: 'C' });
+  W.call('filePut', { path: 'a.txt', baseVersion: 0, contentB64: b64('original') }, user);
+  const t = W.call('createTask', { title: 'T', mode: 'shared' }, user);
+  W.call('registerAgent', { agentId: 'agt_c', name: 'Cy', taskId: t.id }, user);
+  W.call('startTask', { taskId: t.id, agentId: 'agt_c' }, user);
+  W.call('filePut', { path: 'a.txt', baseVersion: 1, contentB64: b64('same text') }, { user: { id: 'u2', name: 'Bo' } }); // Bo wrote it
+  W.call('fileEdited', { agentId: 'agt_c', path: 'a.txt', hash: sha('same text') }, user);
+  assert.equal(W.state.files['a.txt'].by.name, 'Bo', 'Bo keeps the credit');
+  assert.equal(W.state.files['a.txt'].history.at(-1).by.name, 'Bo');
+  assert.equal(W.call('taskChanges', { taskId: t.id }, user)[0].beforeVersion, 1, 'the change is still recorded against the right version');
+  // Uma's own sync, but long ago: not this agent's edit either.
+  W.call('filePut', { path: 'b.txt', baseVersion: 0, contentB64: b64('old') }, user);
+  W.state.files['b.txt'].at -= 5 * 60 * 1000;
+  W.call('fileEdited', { agentId: 'agt_c', path: 'b.txt', hash: sha('old') }, user);
+  assert.equal(W.state.files['b.txt'].by.name, 'Uma');
+  c.close();
+});
+
+test('records have a hard ceiling: updates stop there, while sync of existing files, finishing and cleanup go on', () => {
+  const c = new Coordinator({ dataDir: tmp(), limits: { maxBytes: 400 * 1024 } });
+  const W = c.ensureWorkspace('ceiling-ws', { name: 'H' });
+  W.call('userJoined', { user: { id: 'u1', name: 'Uma' } }, user);
+  W.call('filePut', { path: 'keep.js', baseVersion: 0, contentB64: b64('v1') }, user);
+  const tasks = [];
+  for (let i = 0; i < 12; i++) tasks.push(W.call('createTask', { title: `t${i}` }, user));
+  W.call('registerAgent', { agentId: 'agt_h', name: 'H', taskId: tasks[0].id }, user);
+  W.call('startTask', { taskId: tasks[0].id, agentId: 'agt_h' }, user);
+  let refused = null;
+  for (const t of tasks) {
+    try { W.call('updateTask', { taskId: t.id, description: 'd'.repeat(60000) }, user); W.saveNow(); } catch (e) { refused = e; break; }
+  }
+  assert.match(refused?.message || '', /storage limit/, 'growing existing records stops at the ceiling');
+  assert.ok(W.metaBytes < 400 * 1024 * 0.75, `records stay well under the whole budget (${W.metaBytes})`);
+  // While over the ceiling: nothing new, but everything that only touches what exists still works.
+  assert.throws(() => W.call('userJoined', { user: { id: 'u9', name: 'New' } }, { user: { id: 'u9', name: 'New' } }), /storage limit/);
+  assert.throws(() => W.call('filePut', { path: 'new.js', baseVersion: 0, contentB64: b64('x') }, user), /storage limit/);
+  assert.throws(() => W.call('preEdit', { agentId: 'agt_h', path: 'new.js' }, user), /storage limit/);
+  W.call('userJoined', { user: { id: 'u1', name: 'Uma' } }, user);
+  W.call('filePut', { path: 'keep.js', baseVersion: 1, contentB64: b64('v2') }, user);
+  W.call('fileEdited', { agentId: 'agt_h', path: 'keep.js', hash: sha('v2') }, user);
+  assert.equal(W.call('completeTask', { agentId: 'agt_h', summary: 'done' }, user).status, 'done');
+  for (const t of tasks.slice(1)) W.call('deleteTask', { taskId: t.id }, user);
+  W.saveNow();
+  W.call('createTask', { title: 'room again' }, user);
+  c.close();
+});
+
+test('the event log has a byte budget, so huge events cannot fill a hosted project', () => {
+  const c = new Coordinator({ dataDir: tmp(), limits: { maxBytes: 800 * 1024 } });
+  const W = c.ensureWorkspace('evbytes-ws', { name: 'E' });
+  const t = W.call('createTask', { title: 'T' }, user);
+  for (let i = 0; i < 40; i++) W.call('updateTask', { taskId: t.id, description: `${i}`.repeat(30000) }, user);
+  assert.ok(W.eventBytes <= 100 * 1024, `events.jsonl stays within an eighth of the budget (${W.eventBytes})`);
+  assert.equal(W.eventBytes, fs.statSync(path.join(W.dataDir, 'events.jsonl')).size);
+  c.close();
+});
+
+test('only work brings a released task back: finishing, reopening or exiting does not, and exiting frees a running task', () => {
+  const c = new Coordinator({ dataDir: tmp() });
+  const W = c.ensureWorkspace('term-ws', { name: 'T' });
+  const t = W.call('createTask', { title: 'Job' }, user);
+  W.call('registerAgent', { agentId: 'agt_t', name: 'T', taskId: t.id }, user);
+  W.call('startTask', { taskId: t.id, agentId: 'agt_t' }, user);
+  goOffline(W, 'agt_t');
+  assert.equal(W.state.tasks[t.id].status, 'ready');
+  W.call('agentExited', { agentId: 'agt_t', outcome: 'stopped' }, user);
+  assert.equal(W.state.tasks[t.id].status, 'ready', 'not resumed by its own exit');
+  assert.equal(W.state.tasks[t.id].releasedFrom, undefined);
+  W.call('heartbeat', { agentId: 'agt_t' }, user);
+  assert.equal(W.state.tasks[t.id].status, 'ready', 'an exited agent never takes it back');
+  // An agent that exits while still on its task hands it back to the queue instead of leaving it "running".
+  const t2 = W.call('createTask', { title: 'Job 2' }, user);
+  W.call('registerAgent', { agentId: 'agt_u', name: 'U', taskId: t2.id }, user);
+  W.call('startTask', { taskId: t2.id, agentId: 'agt_u' }, user);
+  W.call('agentExited', { agentId: 'agt_u', outcome: 'error' }, user);
+  assert.equal(W.state.tasks[t2.id].status, 'ready');
+  // Reopening it while offline: no resume either.
+  const t3 = W.call('createTask', { title: 'Job 3' }, user);
+  W.call('registerAgent', { agentId: 'agt_v', name: 'V', taskId: t3.id }, user);
+  W.call('startTask', { taskId: t3.id, agentId: 'agt_v' }, user);
+  goOffline(W, 'agt_v');
+  W.call('reopenTask', { taskId: t3.id, agentId: 'agt_v' }, user);
+  W.call('heartbeat', { agentId: 'agt_v' }, user);
+  assert.equal(W.state.tasks[t3.id].status, 'ready');
+  c.close();
+});
+
+test('a stopped agent registering again does not resume; a TeamCode agent naming its task does', () => {
+  const c = new Coordinator({ dataDir: tmp() });
+  const W = c.ensureWorkspace('rereg-ws', { name: 'R' });
+  const t = W.call('createTask', { title: 'Job' }, user);
+  W.call('registerAgent', { agentId: 'agt_r', name: 'R', taskId: t.id }, user);
+  W.call('startTask', { taskId: t.id, agentId: 'agt_r' }, user);
+  W.call('agentExited', { agentId: 'agt_r', outcome: 'done' }, user);
+  W.call('registerAgent', { agentId: 'agt_r', name: 'R', taskId: t.id }, user);
+  assert.equal(W.state.tasks[t.id].status, 'ready', 'stopped, not swept: stays in the queue');
+  W.call('startTask', { taskId: t.id, agentId: 'agt_r' }, user);
+  goOffline(W, 'agt_r');
+  W.call('registerAgent', { agentId: 'agt_r', name: 'R', taskId: t.id }, user);
+  assert.equal(W.state.tasks[t.id].status, 'running', 'back from sleep for the same task: carries on');
+  c.close();
+});
+
+test('a new session of a fixed-id Claude Code does not reclaim the old session\'s task', () => {
+  const c = new Coordinator({ dataDir: tmp() });
+  const W = c.ensureWorkspace('fixed-ws', { name: 'F' });
+  const t = W.call('createTask', { title: 'Job' }, user);
+  W.call('registerAgent', { agentId: 'agt_cc_1', name: 'Uma\'s Claude Code' }, user);
+  W.call('startTask', { taskId: t.id, agentId: 'agt_cc_1' }, user);
+  goOffline(W, 'agt_cc_1');
+  W.call('registerAgent', { agentId: 'agt_cc_1', name: 'Uma\'s Claude Code' }, user); // days later
+  W.call('heartbeat', { agentId: 'agt_cc_1' }, user);
+  assert.equal(W.state.tasks[t.id].status, 'ready');
+  assert.equal(W.state.agents.agt_cc_1.taskId, null);
+  c.close();
+});
+
+test('a blocked task released by the sweep comes back blocked, not running', () => {
+  const c = new Coordinator({ dataDir: tmp() });
+  const W = c.ensureWorkspace('blk-ws', { name: 'B' });
+  const t = W.call('createTask', { title: 'Job' }, user);
+  W.call('registerAgent', { agentId: 'agt_b', name: 'B', taskId: t.id }, user);
+  W.call('startTask', { taskId: t.id, agentId: 'agt_b' }, user);
+  W.call('reportBlocker', { agentId: 'agt_b', description: 'need the API' }, user);
+  goOffline(W, 'agt_b');
+  assert.equal(W.state.tasks[t.id].status, 'ready');
+  W.call('heartbeat', { agentId: 'agt_b' }, user);
+  assert.equal(W.state.tasks[t.id].status, 'blocked');
+  c.close();
+});
+
+test('re-checking integration keeps one merge-conflict record per task and closes it once clean', () => {
+  const c = new Coordinator({ dataDir: tmp() });
+  const W = c.ensureWorkspace('int-ws', { name: 'I' });
+  const t = W.call('createTask', { title: 'Branch work', mode: 'isolated' }, user);
+  for (let i = 0; i < 5; i++) W.call('integrationChecked', { taskId: t.id, conflicts: ['a.js', `b${i}.js`] }, user);
+  const merges = Object.values(W.state.conflicts).filter((x) => x.kind === 'merge');
+  assert.equal(merges.length, 1);
+  assert.deepEqual(merges[0].files, ['a.js', 'b4.js']);
+  W.call('integrationChecked', { taskId: t.id, conflicts: [] }, user);
+  assert.equal(merges[0].status, 'resolved');
+  c.close();
+});
+
+test('reopening hands the task to its new runner in the same step', () => {
+  const c = new Coordinator({ dataDir: tmp() });
+  const W = c.ensureWorkspace('reopen-ws', { name: 'O' });
+  const t = W.call('createTask', { title: 'Job' }, user);
+  W.call('cancelTask', { taskId: t.id }, user);
+  const seen = [];
+  W.on('event', (e) => { if (e.task === t.id) seen.push({ status: W.state.tasks[t.id].status, runner: W.state.tasks[t.id].runner }); });
+  const r = W.call('reopenTask', { taskId: t.id, runner: 'u2', runnerName: 'Bo', autoStart: true }, user);
+  assert.equal(r.status, 'ready');
+  assert.equal(r.runner, 'u2');
+  assert.equal(r.autoStart, true);
+  assert.ok(seen.every((s) => s.runner === 'u2'), 'no moment where it is ready under the old runner');
+  c.close();
+});
+
+test('Revert skips files whose old version is gone for good, and still records the revert', async () => {
+  const { ProjectSession } = require('../../src/main/session');
+  const calls = [];
+  const fake = {
+    _task: () => ({ id: 't1', mode: 'shared' }),
+    project: { root: tmp() },
+    call: async (op, args) => {
+      calls.push(op);
+      if (op === 'taskChanges') return [{ path: 'gone.js', beforeVersion: 3, changedByOthersSince: [] }, { path: 'flaky.js', beforeVersion: 2, changedByOthersSince: [] }];
+      if (op === 'fileRevert' && args.path === 'gone.js') { const e = new Error('v3 of gone.js is no longer stored'); e.code = 'gone'; throw e; }
+      return {};
+    },
+  };
+  const r = await ProjectSession.prototype.revert.call(fake, 't1');
+  assert.equal(r.ok, true);
+  assert.equal(r.skipped[0].path, 'gone.js');
+  assert.ok(calls.includes('markReverted'));
+  fake.call = async (op, args) => { if (op === 'taskChanges') return [{ path: 'flaky.js', beforeVersion: 2, changedByOthersSince: [] }]; if (op === 'fileRevert') throw new Error('network down'); calls.push(`again:${op}`); return {}; };
+  const r2 = await ProjectSession.prototype.revert.call(fake, 't1');
+  assert.equal(r2.ok, false, 'a temporary failure can be retried');
+  assert.ok(!calls.includes('again:markReverted'));
 });

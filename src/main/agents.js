@@ -318,12 +318,13 @@ class AgentManager extends EventEmitter {
       }
       if (run.stopping) {
         this.log(agentId, 'system', 'Stopped by user');
-        await this.conn.call('agentExited', { agentId, outcome: 'stopped' }).catch(() => {});
         // Back to the queue, but not straight back into an agent: wait for someone to start it again.
+        // This comes before agentExited, which would otherwise put it back as ready with autoStart still on.
         if (mine && task && ['running', 'blocked'].includes(task.status)) {
           await this.conn.call('updateTask', { taskId: m.taskId, autoStart: false }).catch(() => {});
-          await this.conn.call('reopenTask', { taskId: m.taskId, agentId }).catch(() => {});
+          await this.conn.call('reopenTask', { taskId: m.taskId, agentId, autoStart: false }).catch(() => {});
         }
+        await this.conn.call('agentExited', { agentId, outcome: 'stopped' }).catch(() => {});
         return;
       }
       const res = run.lastResult;
@@ -456,9 +457,9 @@ class AgentManager extends EventEmitter {
     } catch (e) {
       fs.rmSync(file, { force: true });
       // Couldn't open a window: release the task like a Stop would.
-      await this.conn.call('agentExited', { agentId, outcome: 'stopped' }).catch(() => {});
       await this.conn.call('updateTask', { taskId: m.taskId, autoStart: false }).catch(() => {});
-      await this.conn.call('reopenTask', { taskId: m.taskId, agentId }).catch(() => {});
+      await this.conn.call('reopenTask', { taskId: m.taskId, agentId, autoStart: false }).catch(() => {});
+      await this.conn.call('agentExited', { agentId, outcome: 'stopped' }).catch(() => {});
       this.emit('runtime');
       throw e;
     }
