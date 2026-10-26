@@ -1,5 +1,5 @@
 'use strict';
-/* TeamCode icon set — 24px grid, 1.6 stroke, drawn to sit on the text baseline. icon('name') returns inline SVG. */
+/* TeamCode icon set: 24px grid, 1.6 stroke, drawn to sit on the text baseline. icon('name') returns inline SVG. */
 const ICON_PATHS = {
   agent: '<rect x="4" y="7" width="16" height="12" rx="2"/><path d="M12 3v4M9 12v1M15 12v1M9.5 16h5"/>',
   tasks: '<path d="M10 6h10M10 12h10M10 18h10"/><path d="m3.5 6 1.5 1.5L7.5 5M3.5 12l1.5 1.5 2.5-2.5M3.5 18l1.5 1.5 2.5-2.5"/>',
@@ -62,7 +62,7 @@ function icon(name, cls = '') {
   return `<svg class="i ${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICON_PATHS[name] || ICON_PATHS.dot}</svg>`;
 }
 
-// Brand mark: three parallel lanes of different lengths — tasks running side by side.
+// Brand mark: three parallel lanes of different lengths, for tasks running side by side.
 function brandMark(size = 24) {
   return `<svg class="mark" width="${size}" height="${size}" viewBox="0 0 24 24" aria-hidden="true"><rect width="24" height="24" rx="5" fill="currentColor"/><path d="M7.5 6.5v11M12 6.5v6.5" stroke="var(--mark-ink)" stroke-width="2.4" stroke-linecap="round"/><path d="M16.5 6.5v9" stroke="var(--signal)" stroke-width="2.4" stroke-linecap="round"/></svg>`;
 }

@@ -91,7 +91,7 @@ class Connection extends EventEmitter {
   call(op, args = {}, timeoutMs = 30000) {
     return new Promise((resolve, reject) => {
       const id = this.nextId++;
-      const timer = setTimeout(() => { this.pending.delete(id); reject(new Error(`${op} timed out — is the team server reachable?`)); }, timeoutMs);
+      const timer = setTimeout(() => { this.pending.delete(id); reject(new Error(`${op} timed out. Is the team server reachable?`)); }, timeoutMs);
       this.pending.set(id, { resolve, reject, timer });
       this._send({ t: 'call', id, op, args });
     });

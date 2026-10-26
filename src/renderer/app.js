@@ -1,5 +1,5 @@
 'use strict';
-/* TeamCode renderer — plain JS, no build step. State lives in S; render() redraws from it. */
+/* TeamCode renderer: plain JS, no build step. State lives in S; render() redraws from it. */
 window.__errors = [];
 window.addEventListener('error', (e) => window.__errors.push(String(e.message)));
 window.addEventListener('unhandledrejection', (e) => window.__errors.push(String(e.reason?.message || e.reason)));
@@ -14,7 +14,7 @@ const MOD = isMac ? '⌘' : 'Ctrl';
 const S = {
   init: null, project: null, view: 'agents', state: null, events: [], presence: [], runtime: {}, status: 'offline', sync: null,
   logs: {}, drawer: null, review: { sel: null, tab: 'tasks', data: {}, busy: null }, taskMode: 'board', showClosed: false,
-  activity: { filter: 'all', q: '' }, ctxTab: 'contracts', gitInfo: null, needsLogin: false,
+  activity: { filter: 'all', q: '' }, ctxTab: 'contracts', gitInfo: null, needsLogin: false, update: null,
 };
 
 // ---------- helpers ----------
@@ -119,6 +119,16 @@ function claudeBanner() {
   return `<div class="banner ok">${icon('check')}<div class="spacer"><b>Claude Code ready</b> <span class="muted mono">${esc(c.version || '')}</span></div><button class="btn sm ghost" data-act="login">Switch account</button></div>`;
 }
 
+// Update notice for the sidebar and welcome screen; empty unless a download is under way or ready.
+function updateNotice() {
+  const u = S.update;
+  if (!u) return '';
+  if (u.status === 'downloading') return `<div class="update-note">${icon('download')}<span class="spacer">Downloading v${esc(u.version)}</span><span class="num faint">${Math.round((u.progress || 0) * 100)}%</span></div>`;
+  if (u.status === 'ready') return `<div class="update-note ready">${icon('download')}<span class="spacer"><b>Update ready</b><span class="faint num"> v${esc(u.version)}</span></span><button class="btn sm primary" data-act="update-install">Restart</button></div>`;
+  if (u.status === 'installing') return `<div class="update-note"><span class="spinner"></span><span class="spacer">Installing update…</span></div>`;
+  return '';
+}
+
 function welcome() {
   const u = me();
   const recent = S.init.projects;
@@ -129,6 +139,7 @@ function welcome() {
       <div class="col" style="gap:12px"><h1>One codebase. Your team and all its agents.</h1>
       <p>Everyone runs their own Claude Code. TeamCode keeps the agents aware of each other, syncs every save, and holds work for review before it lands.</p></div>
       <div class="side-foot">
+        ${updateNotice()}
         ${claudeBanner()}
         <div class="small muted">The host's computer runs the shared workspace. For an always-on team, run <code>npm run server</code> on a server.</div>
       </div>
@@ -184,7 +195,7 @@ function shell() {
   return `<div class="shell">
     <aside class="sidebar">
       <div class="side-head">
-        <button class="proj-switch" data-act="close-project" title="${esc(p.root)} — back to all projects">${brandMark(26)}<span class="spacer"><span class="proj ellipsis" style="display:block">${esc(p.name)}</span><span class="sub">${p.role === 'host' ? (p.shared ? 'Hosting · shared' : 'Hosting') : 'Joined'}</span></span></button>
+        <button class="proj-switch" data-act="close-project" title="${esc(p.root)}. Click for all projects.">${brandMark(26)}<span class="spacer"><span class="proj ellipsis" style="display:block">${esc(p.name)}</span><span class="sub">${p.role === 'host' ? (p.shared ? 'Hosting · shared' : 'Hosting') : 'Joined'}</span></span></button>
       </div>
       ${nav}
       <div class="spacer"></div>
@@ -192,6 +203,7 @@ function shell() {
         <div class="row" style="padding:0 6px"><h4>Online</h4><span class="spacer"></span><span class="st ${conn[0]}">${conn[1]}</span><button class="icon-btn" data-act="invite" title="Invite teammates">${icon('plus')}</button></div>
         <div class="people">${people.map((u) => `<div class="person">${avatar(u.name, 'sm')}<span class="ellipsis">${esc(u.name)}${u.id === me().id ? ' <span class="faint">you</span>' : ''}</span><span class="dot"></span></div>`).join('')}</div>
       </div>
+      ${updateNotice() ? `<div class="side-section">${updateNotice()}</div>` : ''}
       ${sync ? `<div class="side-section">
         <div class="sync-line">${sync.ready ? icon('sync') + ' Synced' : '<span class="spinner"></span> Syncing…'}<span class="spacer"></span><span class="num" title="uploaded / downloaded">↑${sync.up} ↓${sync.down}</span></div>
         ${sync.conflicts?.length ? `<div class="sync-line" style="color:var(--red)">${icon('warn')} ${sync.conflicts.length} file conflict${sync.conflicts.length === 1 ? '' : 's'}</div>` : ''}
@@ -524,6 +536,23 @@ function viewFiles() {
 }
 
 // ---------- Settings ----------
+function updatesSetting() {
+  const u = S.update || { status: 'disabled', current: S.init.version };
+  const line = {
+    disabled: esc(u.error || 'Automatic updates are off.'),
+    idle: 'Not checked yet.',
+    checking: 'Checking for updates…',
+    current: `Up to date${u.checkedAt ? `, checked ${ago(u.checkedAt)}` : ''}.`,
+    available: `Version ${esc(u.version)} is available.`,
+    downloading: `Downloading version ${esc(u.version)}: ${Math.round((u.progress || 0) * 100)}%`,
+    ready: `Version ${esc(u.version)} is downloaded and installs when you restart.`,
+    installing: 'Installing…',
+    error: `Couldn't update: ${esc(u.error || 'unknown error')}`,
+  }[u.status] || '';
+  return `<div class="small">You have <code>v${esc(u.current || S.init.version)}</code>. <span class="${u.status === 'error' ? '' : 'muted'}" style="${u.status === 'error' ? 'color:var(--red)' : ''}">${line}</span></div>
+    <div class="row">${u.status === 'ready' ? `<button class="btn primary" data-act="update-install">${icon('refresh')}Restart and update</button>` : `<button class="btn" data-act="update-check" ${['disabled', 'checking', 'downloading', 'installing'].includes(u.status) ? 'disabled' : ''}>${icon('refresh')}Check for updates</button>`}</div>`;
+}
+
 function viewSettings() {
   const s = S.init.settings;
   const c = S.init.claude;
@@ -550,6 +579,7 @@ function viewSettings() {
       <label class="field">Public server URL <span class="hint">If you expose your TeamCode port with a port-forward or tunnel, invites use this address</span><div class="row"><input id="set-public" value="${esc(s.publicUrl)}" placeholder="https://my-tunnel.example.com"><button class="btn" data-act="save-public">Save</button></div></label>`)}
     ${sec('Other agents', 'Any MCP client can join this workspace: Claude Code in a terminal, Claude desktop, IDEs.', `<div><button class="btn" data-act="external-agent">${icon('link')}Show connection settings</button></div>`)}
     ${sec('Git', 'Isolated agent branches and merge review need a git repository.', !g ? '<span class="spinner"></span>' : g.repo ? `<div class="small">On <code>${esc(g.branch || '(no commits)')}</code> · <span class="num">${g.dirty}</span> uncommitted file${g.dirty === 1 ? '' : 's'}</div><div><button class="btn" data-act="checkpoint">Commit working copy (checkpoint)</button></div>` : `<div class="small muted">This folder isn't a git repository.</div><div><button class="btn" data-act="init-git">Initialize git repository</button></div>`)}
+    ${sec('Updates', 'TeamCode checks for new versions in the background and installs them when you restart.', updatesSetting())}
     ${sec('Shortcuts', '', `<div class="col small" style="gap:6px"><div class="row"><span class="kbd">${MOD} N</span><span class="muted">New task</span></div><div class="row"><span class="kbd">${MOD} P</span><span class="muted">Plan a feature</span></div><div class="row"><span class="kbd">${MOD} 1–7</span><span class="muted">Switch views</span></div><div class="row"><span class="kbd">Esc</span><span class="muted">Close dialogs</span></div></div>`)}
   </div></div>`;
 }
@@ -630,7 +660,7 @@ function taskModal(id) {
       <label class="field">Description <span class="hint">Spec, acceptance criteria, interfaces it provides or uses. This is what the agent reads.</span><textarea id="tm-desc" rows="6">${esc(t?.description || '')}</textarea></label>
       <div class="grid2">
         <label class="field">How should the agent work?<select id="tm-mode"><option value="isolated" ${t?.mode !== 'shared' ? 'selected' : ''}>Isolated branch: review and merge after (safest)</option><option value="shared" ${t?.mode === 'shared' ? 'selected' : ''}>Shared working copy: changes go live instantly</option></select></label>
-        <label class="field">Priority<select id="tm-prio">${[0, 1, 2, 3].map((p) => `<option value="${p}" ${(t?.priority ?? 2) === p ? 'selected' : ''}>P${p}${p === 0 ? ' — urgent' : p === 3 ? ' — low' : ''}</option>`).join('')}</select></label>
+        <label class="field">Priority<select id="tm-prio">${[0, 1, 2, 3].map((p) => `<option value="${p}" ${(t?.priority ?? 2) === p ? 'selected' : ''}>P${p}${p === 0 ? ' (urgent)' : p === 3 ? ' (low)' : ''}</option>`).join('')}</select></label>
       </div>
       ${others.length ? `<label class="field">Depends on <span class="hint">The task waits until these are completed. Leave empty if it can run in parallel.</span><div class="col" style="max-height:150px;overflow:auto;border:1px solid var(--border-2);border-radius:var(--r);padding:10px;gap:7px">${others.map((o) => `<label class="check small"><input type="checkbox" class="tm-dep" value="${o.id}" ${t?.dependsOn.includes(o.id) ? 'checked' : ''}> ${esc(o.title)} <span class="faint">(${esc(TSTATUS[o.status]?.[1] || o.status)})</span></label>`).join('')}</div></label>` : ''}
       <label class="field">Files it will likely touch <span class="hint">Optional, comma-separated. Used to warn about tasks that shouldn't run in parallel.</span><input id="tm-files" value="${esc((t?.files || []).join(', '))}" placeholder="src/editor/Track.ts, src/api/export.ts"></label>
@@ -645,7 +675,7 @@ function taskModal(id) {
 function planModal() {
   modal(`${mhead('Plan a feature', 'plan')}
     <div class="modal-body">
-      <div class="muted small">Describe what you want built. Claude reads the repository and proposes subtasks with dependencies — independent tasks run in parallel, dependent ones wait for the interfaces they need.</div>
+      <div class="muted small">Describe what you want built. Claude reads the repository and proposes subtasks with dependencies. Independent tasks run in parallel; dependent ones wait for the interfaces they need.</div>
       <textarea id="plan-text" rows="6" autofocus placeholder="e.g. Add a track editor: users can draw tracks on a canvas, save them, and export to JSON and SVG. Include tests."></textarea>
       <div id="plan-result"></div>
     </div>
@@ -693,7 +723,7 @@ A['detect-claude'] = async () => { const r = await run(() => api('app:detectClau
 A['browse-claude'] = async () => { const r = await run(() => api('app:browseClaude')); if (r) { S.init.claude = r; render(); } };
 A.login = async () => {
   if (!(await run(() => api('app:loginClaude')))) return;
-  toast('Finish signing in in the window that opened — TeamCode notices automatically.', 'info', 8000);
+  toast('Finish signing in in the window that opened. TeamCode notices automatically.', 'info', 8000);
   // Poll until the CLI reports a signed-in account.
   for (let i = 0; i < 100; i++) {
     await new Promise((r) => setTimeout(r, 3000));
@@ -864,7 +894,7 @@ A['rv-approve'] = (d) => reviewBusy('approve', async () => {
     r = await run(() => api('review:approve', { taskId: d.id, checkpoint: true }));
   }
   if (!r) return;
-  if (r.ok) { toast('Approved and integrated', 'ok'); loadDiff(d.id, true); } else if (r.conflicts) toast(`Merge has conflicts in ${r.conflicts.length} file(s) — nothing was changed. Ask the agent to resolve them.`, 'warn', 8000);
+  if (r.ok) { toast('Approved and integrated', 'ok'); loadDiff(d.id, true); } else if (r.conflicts) toast(`Merge has conflicts in ${r.conflicts.length} file(s). Nothing was changed. Ask the agent to resolve them.`, 'warn', 8000);
 });
 A['rv-reject'] = async (d) => {
   const t = S.state.tasks[d.id];
@@ -890,11 +920,11 @@ A['contract-modal'] = (d) => {
   modal(`${mhead(c ? `Update contract “${esc(c.name)}”` : 'Publish an interface contract')}<div class="modal-body">
     <label class="field">Name<input id="ct-name" ${c ? 'readonly' : 'autofocus'} value="${esc(c?.name || '')}" placeholder="track-export API"></label>
     <label class="field">Summary<input id="ct-desc" value="${esc(c?.description || '')}"></label>
-    <label class="field">Interface <span class="hint">Types, signatures, endpoints, schema — what dependent tasks build against</span><textarea id="ct-content" rows="12" class="mono" ${c ? 'autofocus' : ''}>${esc(c?.content || '')}</textarea></label></div>
+    <label class="field">Interface <span class="hint">Types, signatures, endpoints, schema: what dependent tasks build against</span><textarea id="ct-content" rows="12" class="mono" ${c ? 'autofocus' : ''}>${esc(c?.content || '')}</textarea></label></div>
     <div class="modal-foot"><button class="btn" data-act="modal-close">Cancel</button><button class="btn primary" data-act="contract-save">Publish</button></div>`, { wide: true });
 };
 A['contract-save'] = async () => {
-  const r = await run(() => call('publishContract', { name: $('#ct-name').value.trim(), description: $('#ct-desc').value, content: $('#ct-content').value }), 'Contract published — dependent agents are notified');
+  const r = await run(() => call('publishContract', { name: $('#ct-name').value.trim(), description: $('#ct-desc').value, content: $('#ct-content').value }), 'Contract published. Dependent agents are notified.');
   if (r) closeModal();
 };
 A['decision-modal'] = () => modal(`${mhead('Record a decision')}<div class="modal-body">
@@ -903,7 +933,7 @@ A['decision-modal'] = () => modal(`${mhead('Record a decision')}<div class="moda
   <label class="field">Why<textarea id="dc-why" rows="2"></textarea></label></div>
   <div class="modal-foot"><button class="btn" data-act="modal-close">Cancel</button><button class="btn primary" data-act="decision-save">Record</button></div>`);
 A['decision-save'] = async () => {
-  const r = await run(() => call('recordDecision', { title: $('#dc-title').value.trim(), decision: $('#dc-dec').value.trim(), rationale: $('#dc-why').value }), 'Decision recorded — all agents will follow it');
+  const r = await run(() => call('recordDecision', { title: $('#dc-title').value.trim(), decision: $('#dc-dec').value.trim(), rationale: $('#dc-why').value }), 'Decision recorded. All agents will follow it.');
   if (r) closeModal();
 };
 A['blocker-resolve'] = (d) => { const resolution = prompt('How was it resolved?') ?? null; if (resolution !== null) run(() => call('resolveBlocker', { blockerId: d.id, resolution }), 'Blocker resolved'); };
@@ -914,7 +944,7 @@ A['conflict-resolve'] = async (d) => {
   const dec = (b) => (b ? new TextDecoder().decode(Uint8Array.from(atob(b), (x) => x.charCodeAt(0))) : '');
   const cur = dec(c.currentB64), inc = dec(c.incomingB64);
   const hunks = TCDiff.lineDiff(cur, inc);
-  modal(`${mhead(`Resolve edit conflict — ${esc(c.path)}`)}<div class="modal-body">
+  modal(`${mhead(`Resolve edit conflict: ${esc(c.path)}`)}<div class="modal-body">
     <div class="small">${esc(c.message)}</div>
     <div class="small muted">Diff from the saved version (v${c.currentVersion} by ${esc(c.currentBy)}) to the conflicting edit by ${esc(c.incomingBy?.name)}:</div>
     ${diffFile(c.path, hunks, '', false)}
@@ -934,7 +964,7 @@ A['cf-go'] = async (d) => {
 A['file-history'] = async (d) => {
   const h = await run(() => call('fileHistory', { path: d.path }));
   if (!h) return;
-  modal(`${mhead(`History — ${esc(d.path)}`)}<div class="modal-body"><table class="t"><tr><th>Version</th><th>By</th><th>When</th><th></th></tr>${h.map((v, i) => `<tr><td class="num">v${v.version}${v.deleted ? ' (deleted)' : ''}</td><td>${esc(v.by?.name)}</td><td class="faint">${new Date(v.at).toLocaleString()}</td><td>${i ? `<button class="btn sm" data-act="file-restore" data-path="${esc(d.path)}" data-v="${v.version}">Restore</button>` : '<span class="tag green">current</span>'}</td></tr>`).join('')}</table></div>`);
+  modal(`${mhead(`History: ${esc(d.path)}`)}<div class="modal-body"><table class="t"><tr><th>Version</th><th>By</th><th>When</th><th></th></tr>${h.map((v, i) => `<tr><td class="num">v${v.version}${v.deleted ? ' (deleted)' : ''}</td><td>${esc(v.by?.name)}</td><td class="faint">${new Date(v.at).toLocaleString()}</td><td>${i ? `<button class="btn sm" data-act="file-restore" data-path="${esc(d.path)}" data-v="${v.version}">Restore</button>` : '<span class="tag green">current</span>'}</td></tr>`).join('')}</table></div>`);
 };
 A['file-restore'] = async (d) => { if (confirm(`Restore ${d.path} to v${d.v} for the whole team?`)) { const r = await run(() => call('fileRevert', { path: d.path, version: Number(d.v) }), 'Restored'); if (r) closeModal(); } };
 
@@ -956,6 +986,14 @@ A['external-agent'] = async () => {
 };
 A['init-git'] = async () => { const g = await run(() => api('project:initGit'), 'Git repository initialized'); if (g) { S.gitInfo = g; render(); } };
 A.checkpoint = async () => { const r = await run(() => api('project:checkpoint')); toast(r ? `Committed ${String(r).slice(0, 8)}` : 'Nothing to commit', 'ok'); S.gitInfo = null; render(); };
+
+A['update-install'] = async (d, el) => { el.disabled = true; await run(() => api('update:install')); };
+A['update-check'] = async (d, el) => {
+  el.disabled = true;
+  const u = await run(() => api('update:check'));
+  if (u) { S.update = u; if (u.status === 'current') toast(`You're on the latest version (${u.current})`, 'ok'); }
+  render();
+};
 
 A['modal-close'] = closeModal;
 A['modal-bg'] = (d, el, e) => { if (e.target === el) closeModal(); };
@@ -999,6 +1037,7 @@ window.tc.on('tc:sync', (s) => { S.sync = s; render(); });
 window.tc.on('tc:runtime', (r) => { S.runtime = r; render(); });
 window.tc.on('tc:toast', (t) => toast(t.text, t.kind));
 window.tc.on('tc:needsLogin', () => { S.needsLogin = true; render(); });
+window.tc.on('tc:update', (u) => { S.update = u; render(); });
 window.tc.on('tc:agentLog', ({ agentId, entry }) => {
   (S.logs[agentId] ||= []).push(entry);
   if (S.drawer?.kind === 'agent' && S.drawer.id === agentId) renderDrawer();
@@ -1009,6 +1048,7 @@ setInterval(() => { if (S.project && !$('#modal-root').innerHTML) render(); }, 3
 
 (async () => {
   S.init = await api('app:init');
+  S.update = S.init.update;
   if (S.init.current) {
     S.project = S.init.current;
     const st = await api('ws:state');

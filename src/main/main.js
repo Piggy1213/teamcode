@@ -11,6 +11,8 @@ const { encodeInvite, decodeInvite } = require('../../server/invite');
 const { ProjectSession } = require('./session');
 const { findClaude, claudeVersion, claudeAuthStatus, loginScript, findNode } = require('./claude-cli');
 const git = require('./git');
+const { Updater } = require('./updater');
+const pkg = require('../../package.json');
 
 const DEFAULT_PORT = 4477;
 if (process.env.TEAMCODE_USERDATA) app.setPath('userData', process.env.TEAMCODE_USERDATA);
@@ -25,6 +27,7 @@ let session = null;
 let teamServer = null;
 let serverPort = null;
 let serverHost = null;
+let updater = null;
 
 // ---------- config ----------
 const defaults = () => ({
@@ -43,7 +46,7 @@ function send(channel, payload) {
 
 function notify(title, body) {
   if (win && win.isFocused()) return;
-  if (Notification.isSupported()) new Notification({ title: `TeamCode — ${title}`, body: String(body || '').slice(0, 200) }).show();
+  if (Notification.isSupported()) new Notification({ title: `TeamCode: ${title}`, body: String(body || '').slice(0, 200) }).show();
 }
 
 // ---------- embedded team server ----------
@@ -100,7 +103,7 @@ async function openSession(project) {
   saveConfig();
   session = new ProjectSession({ project, user: config.user, getSettings, send, dataDir: userData, scripts, notify });
   await session.start();
-  win?.setTitle(`${project.name} — TeamCode`);
+  win?.setTitle(`${project.name} · TeamCode`);
   return projectView(project);
 }
 
@@ -128,6 +131,7 @@ const handlers = {
       claude: await claudeInfo(config.settings.claudePath),
       nodeFound: !!findNode(),
       current: session ? projectView(session.project) : null,
+      update: updater.state,
     };
   },
   'app:setUser': ({ name }) => { config.user.name = String(name || '').trim().slice(0, 40) || 'Developer'; saveConfig(); return config.user; },
@@ -246,6 +250,9 @@ const handlers = {
   'review:approve': ({ taskId, checkpoint }) => requireSession().approve(taskId, { checkpoint }),
   'review:reject': ({ taskId, note, discard }) => requireSession().reject(taskId, { note, discard }),
   'review:revert': ({ taskId }) => requireSession().revert(taskId),
+
+  'update:check': () => updater.check(),
+  'update:install': async () => { if (await updater.install({ relaunch: true })) app.quit(); return updater.state; },
 };
 
 for (const [channel, fn] of Object.entries(handlers)) {
@@ -269,7 +276,17 @@ function createWindow() {
   if (process.env.TEAMCODE_SCREENSHOT) require('./smoke').run(win, { handlers, getSession: () => session, openSession, config });
 }
 
-app.whenReady().then(createWindow);
+// TEAMCODE_UPDATE_URL turns the updater on in development, for testing against a local website.
+updater = new Updater({
+  feedUrl: process.env.TEAMCODE_UPDATE_URL || pkg.teamcode?.updateUrl,
+  currentVersion: process.env.TEAMCODE_FAKE_VERSION || app.getVersion(),
+  dir: path.join(userData, 'updates'),
+  enabled: app.isPackaged || !!process.env.TEAMCODE_UPDATE_URL,
+  canInstall: app.isPackaged,
+  onState: (state) => send('tc:update', state),
+});
+
+app.whenReady().then(() => { createWindow(); updater.start(); });
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
 app.on('activate', () => { if (!win) createWindow(); });
 app.on('before-quit', async (e) => {
@@ -277,5 +294,7 @@ app.on('before-quit', async (e) => {
   app._tcQuitting = true;
   e.preventDefault();
   try { if (session) await session.stop(); if (teamServer) await teamServer.close(); } catch { /* quitting anyway */ }
+  // A downloaded update installs as the app quits.
+  try { if (updater.state.status === 'ready') await updater.install({ relaunch: false }); } catch { /* keep the download for next time */ }
   app.quit();
 });

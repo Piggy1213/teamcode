@@ -1,4 +1,4 @@
-/* TeamCode — quiet monochrome chrome; colour is reserved for status. */
+/* TeamCode: quiet monochrome chrome; colour is reserved for status. */
 :root {
   --bg: #fbfbfa;
   --side: #f4f4f2;
@@ -207,6 +207,9 @@ label.check { display: flex; gap: 8px; align-items: center; cursor: pointer; }
 .people { display: flex; flex-direction: column; gap: 2px; max-height: 180px; overflow: auto; }
 .person { display: flex; align-items: center; gap: 8px; font-size: 12.5px; padding: 3px 6px; }
 .person .dot { width: 6px; height: 6px; border-radius: 2px; background: var(--green); margin-left: auto; flex: none; }
+.update-note { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); padding: 2px 6px; }
+.update-note.ready { color: var(--text); background: var(--panel); border: 1px solid var(--border-2); border-radius: var(--r); padding: 6px 6px 6px 10px; box-shadow: var(--shadow); }
+.update-note.ready > svg.i { color: var(--signal); }
 .sync-line { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); padding: 0 6px; }
 
 .main { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--bg); }

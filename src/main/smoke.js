@@ -40,7 +40,7 @@ async function run(win, { handlers, getSession, config }) {
     await agent('agt_demo_nova', 'Nova', model.id, 'teamcode/track-model');
     await call('fileEdited', { agentId: 'agt_demo_nova', path: 'src/model/track.ts', hash: 'h1' });
     await call('publishContract', { agentId: 'agt_demo_nova', name: 'track-model', description: 'Track types + store API', content: 'export interface Track { id: string; name: string; segments: Segment[] }\nexport interface Segment { from: Point; to: Point; kind: "line" | "curve" }\nexport function saveTrack(t: Track): Promise<void>\nexport function loadTrack(id: string): Promise<Track>' });
-    await call('publishUpdate', { agentId: 'agt_demo_nova', kind: 'discovery', message: 'IndexedDB wrapper already exists in src/lib/db.ts — reuse it.' });
+    await call('publishUpdate', { agentId: 'agt_demo_nova', kind: 'discovery', message: 'IndexedDB wrapper already exists in src/lib/db.ts, so reuse it.' });
     await call('recordDecision', { agentId: 'agt_demo_nova', title: 'Coordinates', decision: 'All track coordinates are stored in metres, converted to pixels only in the editor.', rationale: 'Keeps export resolution-independent' });
     await call('completeTask', { agentId: 'agt_demo_nova', summary: 'Track model, Segment type and IndexedDB store implemented with tests.' });
     await call('requestReview', { agentId: 'agt_demo_nova', taskId: model.id, files: ['src/model/track.ts', 'src/model/store.ts'], stats: { files: 2, insertions: 148, deletions: 6 } });
@@ -59,7 +59,7 @@ async function run(win, { handlers, getSession, config }) {
     await call('registerAgent', { agentId: 'agt_demo_echo', name: 'Echo', client: 'Claude Code', taskId: polish.id, userId: me.id, mode: 'shared', branch: 'main' });
     await call('startTask', { taskId: polish.id, agentId: 'agt_demo_echo' });
     await call('reportBlocker', { agentId: 'agt_demo_echo', description: 'Design tokens for dark mode are missing', needs: 'Decision on colour palette' });
-    await call('chat', { text: 'Atlas and Pixel are both on the track model — I asked them to agree on curve types first.' });
+    await call('chat', { text: 'Atlas and Pixel are both on the track model. I asked them to agree on curve types first.' });
     await sleep(800);
 
     win.webContents.reload();
@@ -81,6 +81,12 @@ async function run(win, { handlers, getSession, config }) {
     await shot('12-new-task');
     await js('closeModal(); A.invite();');
     await shot('13-invite');
+    if (process.env.TEAMCODE_UPDATE_URL) {
+      await js('closeModal(); api("update:check").then((u) => { S.update = u; S.view = "settings"; renderNow(); })');
+      await sleep(2500);
+      await js('renderNow()');
+      await shot('14-update');
+    }
     const errors = await js('window.__errors || []');
     fs.writeFileSync(path.join(out, 'result.json'), JSON.stringify({ ok: true, errors }, null, 1));
   } catch (e) {

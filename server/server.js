@@ -1,7 +1,7 @@
 'use strict';
 // HTTP + WebSocket front-end for the Coordinator.
-//   HTTP  POST /api/<workspace>/<op>   (Authorization: Bearer <token>)  — used by MCP servers and hooks
-//   WS    /ws                           — used by desktop clients for live events and file sync
+//   HTTP  POST /api/<workspace>/<op>   (Authorization: Bearer <token>)  : used by MCP servers and hooks
+//   WS    /ws                           : used by desktop clients for live events and file sync
 const http = require('http');
 const crypto = require('crypto');
 const { WebSocketServer } = require('ws');

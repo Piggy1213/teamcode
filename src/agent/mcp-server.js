@@ -110,7 +110,7 @@ const TOOLS = [
   },
   {
     name: 'request_review',
-    description: 'Ask for your changes to be reviewed and integrated. Completion is not the same as approval — a human or reviewer decides.',
+    description: 'Ask for your changes to be reviewed and integrated. Completion is not the same as approval: a human or reviewer decides.',
     inputSchema: S({ summary: str('What changed and how it was verified') }, ['summary']),
     run: (a) => agentCall(cfg, 'requestReview', { summary: a.summary }),
   },
@@ -154,7 +154,7 @@ const TOOLS = [
 ];
 
 const INSTRUCTIONS = `TeamCode connects you with other AI agents working on the same project at the same time.
-Workflow: (1) call get_context before starting; (2) before changing files another agent may touch, call check_files or announce_edit; (3) publish_update at milestones and for discoveries; record_decision for architectural choices; (4) publish_contract as soon as an interface others depend on is defined; (5) report_blocker instead of guessing about another task's API; (6) when done, update_task_status completed and request_review. Team updates relevant to you are appended to tool results — act on them. Keep messages short and task-focused.`;
+Workflow: (1) call get_context before starting; (2) before changing files another agent may touch, call check_files or announce_edit; (3) publish_update at milestones and for discoveries; record_decision for architectural choices; (4) publish_contract as soon as an interface others depend on is defined; (5) report_blocker instead of guessing about another task's API; (6) when done, update_task_status completed and request_review. Team updates relevant to you are appended to tool results. Act on them. Keep messages short and task-focused.`;
 
 function send(msg) { process.stdout.write(JSON.stringify(msg) + '\n'); }
 

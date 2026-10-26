@@ -1,7 +1,7 @@
 'use strict';
 const { contextBridge, ipcRenderer } = require('electron');
 
-const CHANNELS = ['tc:snapshot', 'tc:event', 'tc:events', 'tc:status', 'tc:presence', 'tc:sync', 'tc:agentLog', 'tc:runtime', 'tc:toast', 'tc:needsLogin'];
+const CHANNELS = ['tc:snapshot', 'tc:event', 'tc:events', 'tc:status', 'tc:presence', 'tc:sync', 'tc:agentLog', 'tc:runtime', 'tc:toast', 'tc:needsLogin', 'tc:update'];
 
 contextBridge.exposeInMainWorld('tc', {
   invoke: async (channel, args) => {

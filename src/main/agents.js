@@ -83,7 +83,7 @@ class AgentManager extends EventEmitter {
         if (merged) baseCommit = await git.head(worktree);
       } else {
         mode = 'shared';
-        this.log(agentId, 'system', 'Isolated mode needs a git repository with at least one commit — running in the shared working copy instead.');
+        this.log(agentId, 'system', 'Isolated mode needs a git repository with at least one commit, so this agent runs in the shared working copy instead.');
       }
     }
 
@@ -105,10 +105,10 @@ class AgentManager extends EventEmitter {
       const dep = this.getState()?.tasks?.[id];
       if (!dep || dep.mode !== 'isolated' || !dep.branch || dep.branch === 'main' || dep.integration?.state === 'merged') continue;
       const exists = (await git.git(this.root, ['rev-parse', '--verify', `refs/heads/${dep.branch}`], { allowFail: true })).code === 0;
-      if (!exists) { this.log(agentId, 'system', `Dependency "${dep.title}" is on ${dep.branch}, which isn't on this computer — its code won't be in this worktree until it's merged.`); continue; }
+      if (!exists) { this.log(agentId, 'system', `Dependency "${dep.title}" is on ${dep.branch}, which isn't on this computer. Its code won't be in this worktree until it's merged.`); continue; }
       const r = await git.merge(worktree, dep.branch, `Build on "${dep.title}" (TeamCode dependency)`);
       if (r.ok) { merged++; this.log(agentId, 'system', `Included unmerged dependency "${dep.title}" from ${dep.branch}`); }
-      else this.log(agentId, 'error', `Could not combine dependency "${dep.title}" (${r.conflicts.join(', ') || r.error}) — starting without it.`);
+      else this.log(agentId, 'error', `Could not combine dependency "${dep.title}" (${r.conflicts.join(', ') || r.error}). Starting without it.`);
     }
     return merged;
   }
@@ -119,21 +119,21 @@ class AgentManager extends EventEmitter {
     lines.push(`\n## Your task: ${task.title}\n${task.description || '(no further description)'}`);
     if (task.files?.length) lines.push(`Expected files: ${task.files.join(', ')}`);
     lines.push(mode === 'isolated'
-      ? `You are working in your own git worktree on branch "${branch}". Your changes are reviewed and merged after you finish; do not commit — TeamCode commits for you.`
+      ? `You are working in your own git worktree on branch "${branch}". Your changes are reviewed and merged after you finish; do not commit; TeamCode commits for you.`
       : 'You are working in the shared working copy: other agents and teammates edit this same folder live. Keep edits focused on your task.');
     if (ctx.dependencies?.length) lines.push('\n## Tasks you depend on\n' + ctx.dependencies.map((d) => `- ${d.title} [${d.status}]${d.summary ? `: ${clip(d.summary, 300)}` : ''}`).join('\n'));
     if (ctx.dependents?.length) lines.push('\n## Tasks that depend on you (publish contracts for them early)\n' + ctx.dependents.map((d) => `- ${d.title} [${d.status}]`).join('\n'));
-    if (ctx.activeAgents?.length) lines.push('\n## Other agents working right now\n' + ctx.activeAgents.map((a) => `- ${a.name}: ${a.task || 'no task'} (${a.status}${a.branch && a.branch !== 'main' ? `, branch ${a.branch}` : ''})${a.editing.length ? ` — editing ${a.editing.slice(0, 6).join(', ')}` : ''}`).join('\n'));
+    if (ctx.activeAgents?.length) lines.push('\n## Other agents working right now\n' + ctx.activeAgents.map((a) => `- ${a.name}: ${a.task || 'no task'} (${a.status}${a.branch && a.branch !== 'main' ? `, branch ${a.branch}` : ''})${a.editing.length ? `, editing ${a.editing.slice(0, 6).join(', ')}` : ''}`).join('\n'));
     const contracts = (ctx.contracts || []).filter((c) => c.content);
     if (contracts.length) lines.push('\n## Agreed interface contracts\n' + contracts.map((c) => `### ${c.name} v${c.version}\n${clip(c.content, 3000)}`).join('\n'));
     const others = (ctx.contracts || []).filter((c) => !c.content);
     if (others.length) lines.push(`Other contracts available via get_contract: ${others.map((c) => `${c.name} v${c.version}`).join(', ')}`);
     if (ctx.decisions?.length) lines.push('\n## Team decisions (follow these)\n' + ctx.decisions.map((d) => `- ${d.title}: ${d.decision}`).join('\n'));
     if (ctx.openBlockers?.length) lines.push('\n## Open blockers\n' + ctx.openBlockers.map((b) => `- ${b.description}${b.task ? ` (task ${b.task})` : ''}`).join('\n'));
-    if (task.parallelNotes?.length) lines.push('\n## Parallel-work warnings\n' + task.parallelNotes.map((p) => `- Task "${p.title}" also expects to touch ${p.files.join(', ')} — coordinate before large edits there.`).join('\n'));
+    if (task.parallelNotes?.length) lines.push('\n## Parallel-work warnings\n' + task.parallelNotes.map((p) => `- Task "${p.title}" also expects to touch ${p.files.join(', ')}. Coordinate before large edits there.`).join('\n'));
     if (ctx.notes?.length) lines.push('\n## Recent discoveries\n' + ctx.notes.slice(-6).map((n) => `- ${n.by}: ${clip(n.message, 200)}`).join('\n'));
     lines.push(`\n## How to collaborate
-- TeamCode hooks tell you automatically when teammates change files you have read, and will stop an edit if a file changed since you read it. When that happens, re-read the file and re-apply your change on top — never overwrite others' work.
+- TeamCode hooks tell you automatically when teammates change files you have read, and will stop an edit if a file changed since you read it. When that happens, re-read the file and re-apply your change on top. Never overwrite others' work.
 - Use the teamcode MCP tools: announce_edit before big edits to shared files; publish_contract as soon as you define an interface another task depends on; record_decision for architectural choices; report_blocker instead of guessing another task's API; publish_update (kind "progress") at real milestones only. Keep messages short.
 - Stay within your task's scope and do not refactor code owned by other tasks.
 - When finished: run the relevant tests if the project has them, call update_task_status with status "completed" and a 1-3 sentence summary, then stop.`);
@@ -217,7 +217,7 @@ class AgentManager extends EventEmitter {
     if (msg.type === 'system' && msg.subtype === 'init') {
       m.sessionId = msg.session_id; m.model = msg.model; this._saveMeta();
       const tc = (msg.mcp_servers || []).find((s) => s.name === 'teamcode');
-      this.log(agentId, 'system', `Session started (${msg.model || 'Claude'})${tc ? ` — teamcode MCP ${tc.status}` : ''}`);
+      this.log(agentId, 'system', `Session started (${msg.model || 'Claude'})${tc ? `, teamcode MCP ${tc.status}` : ''}`);
       return;
     }
     if (msg.type === 'assistant') {
@@ -241,7 +241,7 @@ class AgentManager extends EventEmitter {
     if (msg.type === 'result') {
       run.lastResult = msg;
       run.pendingTurns = Math.max(0, run.pendingTurns - 1);
-      if (msg.is_error || msg.subtype !== 'success') this.log(agentId, 'error', `Turn ended: ${msg.subtype}${msg.result ? ` — ${clip(msg.result, 300)}` : ''}`);
+      if (msg.is_error || msg.subtype !== 'success') this.log(agentId, 'error', `Turn ended: ${msg.subtype}${msg.result ? `: ${clip(msg.result, 300)}` : ''}`);
       else this.log(agentId, 'result', msg.result || 'Done');
       if (msg.total_cost_usd) { m.costUsd = (m.costUsd || 0) + msg.total_cost_usd; this._saveMeta(); }
       if (run.pendingTurns === 0) run.child.stdin.end();
@@ -270,7 +270,7 @@ class AgentManager extends EventEmitter {
       if (task && ['running', 'blocked'].includes(task.status)) await this.conn.call('completeTask', { agentId, taskId: m.taskId, summary });
       await this._requestReview(agentId, m, task, summary);
       await this.conn.call('agentExited', { agentId, outcome: 'done' });
-      this.log(agentId, 'system', 'Finished — changes sent for review');
+      this.log(agentId, 'system', 'Finished. Changes sent for review.');
     } else {
       const error = res?.result || clip(errText.trim(), 500) || `Claude Code exited with code ${code}`;
       this.log(agentId, 'error', error);
@@ -363,7 +363,7 @@ Respond with ONLY a JSON object, no prose:
           if (!Array.isArray(json.tasks)) throw new Error('No tasks in plan');
           resolve(json);
         } catch (e) {
-          reject(new Error(`Planning failed: ${e.message}${err ? ` — ${clip(err, 300)}` : ''}`));
+          reject(new Error(`Planning failed: ${e.message}${err ? `: ${clip(err, 300)}` : ''}`));
         }
       });
       child.stdin.end(prompt);

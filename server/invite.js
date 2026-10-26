@@ -14,7 +14,7 @@ function decodeInvite(code) {
     if (!o.u || !o.w || !o.k) throw new Error();
     return { url: o.u.replace(/\/+$/, ''), workspace: o.w, token: o.k, name: o.n || o.w };
   } catch {
-    throw new Error('Invite code is damaged — ask your teammate to copy it again');
+    throw new Error('Invite code is damaged. Ask your teammate to copy it again.');
   }
 }
 

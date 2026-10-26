@@ -2,8 +2,11 @@
   "name": "teamcode",
   "productName": "TeamCode",
   "version": "1.0.0",
-  "description": "Code together with your team — everyone's Claude Code sees everyone's changes in real time.",
+  "description": "Code together with your team: everyone's Claude Code sees everyone's changes in real time.",
   "main": "src/main/main.js",
+  "teamcode": {
+    "updateUrl": ""
+  },
   "author": "TeamCode",
   "license": "MIT",
   "scripts": {

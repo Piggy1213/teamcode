@@ -41,7 +41,7 @@ async function latestRelease() {
     else if (!r.ok) cache = { at: Date.now(), release: null, error: `GitHub API returned ${r.status}` };
     else {
       const j = await r.json();
-      cache = { at: Date.now(), error: null, release: { version: j.tag_name, name: j.name, publishedAt: j.published_at, notes: j.body || '', assets: j.assets.map((a) => ({ id: a.id, name: a.name, size: a.size })) } };
+      cache = { at: Date.now(), error: null, release: { version: j.tag_name, name: j.name, publishedAt: j.published_at, notes: j.body || '', assets: j.assets.map((a) => ({ id: a.id, name: a.name, size: a.size, digest: a.digest || null })) } };
     }
   } catch (e) {
     cache = { at: Date.now() - CACHE_MS + 15000, release: null, error: e.message };
@@ -64,9 +64,10 @@ async function handle(req, res) {
     const { release, error } = await latestRelease();
     const platforms = Object.fromEntries(Object.entries(PLATFORMS).map(([k, v]) => {
       const a = release?.assets.find((x) => v.match(x.name));
-      return [k, a ? { label: v.label, file: a.name, sizeMb: +(a.size / 1048576).toFixed(1) } : null];
+      // size and digest ("sha256:<hex>") let the desktop app's updater verify what it downloads.
+      return [k, a ? { label: v.label, file: a.name, size: a.size, sizeMb: +(a.size / 1048576).toFixed(1), digest: a.digest } : null];
     }));
-    return send(res, 200, JSON.stringify({ version: release?.version || null, publishedAt: release?.publishedAt || null, platforms, error }), { 'content-type': 'application/json' });
+    return send(res, 200, JSON.stringify({ version: release?.version || null, publishedAt: release?.publishedAt || null, notes: (release?.notes || '').slice(0, 2000), platforms, error }), { 'content-type': 'application/json' });
   }
 
   const dl = p.match(/^\/download\/([\w-]+)$/);
@@ -79,7 +80,7 @@ async function handle(req, res) {
     // Ask GitHub for the asset; it answers with a redirect to a signed, short-lived download URL.
     const r = await github(`https://api.github.com/repos/${REPO}/releases/assets/${asset.id}`, { headers: { accept: 'application/octet-stream' }, redirect: 'manual' });
     const location = r.headers.get('location');
-    if (!location) return send(res, 502, 'Download is temporarily unavailable — please try again shortly.');
+    if (!location) return send(res, 502, 'Download is temporarily unavailable. Please try again shortly.');
     return send(res, 302, '', { location });
   }
 

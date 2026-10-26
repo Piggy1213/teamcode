@@ -151,22 +151,22 @@ class Workspace extends EventEmitter {
       case 'user.left': return `${e.actor.name} left`;
       case 'chat.message': return `${e.actor.name}: ${clip(d.text, 200)}`;
       case 'agent.joined': return `${e.actor.name} (${d.client || 'AI agent'}) joined${tt ? ' for task' + tt : ''}`;
-      case 'agent.status_changed': return `${e.actor.name} is now ${d.to}${d.detail ? ` — ${clip(d.detail, 100)}` : ''}`;
+      case 'agent.status_changed': return `${e.actor.name} is now ${d.to}${d.detail ? `: ${clip(d.detail, 100)}` : ''}`;
       case 'agent.progress': return `${e.actor.name}: ${clip(d.message, 200)}`;
       case 'agent.error': return `${e.actor.name} hit an error: ${clip(d.message, 200)}`;
       case 'agent.approach_changed': return `${e.actor.name} changed approach: ${clip(d.message, 200)}`;
       case 'task.created': return `Task${tt} created${d.dependsOn?.length ? ` (depends on ${d.dependsOn.length})` : ''}`;
       case 'task.updated': return `Task${tt} updated (${Object.keys(d.changes || {}).join(', ')})`;
       case 'task.assigned': return `Task${tt} assigned to ${d.assigneeName || d.runnerName || 'someone'}`;
-      case 'task.ready': return `Task${tt} is ready — all dependencies done`;
+      case 'task.ready': return `Task${tt} is ready; all dependencies done`;
       case 'task.started': return `${e.actor.name} started task${tt}${e.branch ? ` on ${e.branch}` : ''}`;
       case 'task.blocked': return `Task${tt} blocked: ${clip(d.reason, 120)}`;
       case 'task.completed': return `Task${tt} completed${d.summary ? `: ${clip(d.summary, 160)}` : ''}`;
       case 'task.failed': return `Task${tt} failed: ${clip(d.error, 140)}`;
       case 'task.cancelled': return `Task${tt} cancelled`;
       case 'task.deleted': return `Task "${clip(d.title, 60)}" deleted`;
-      case 'file.edit_started': return `${e.actor.name} started editing ${f}${d.intent ? ` — ${clip(d.intent, 100)}` : ''}${d.exclusive ? ' (exclusive)' : ''}`;
-      case 'file.changed': return `${e.actor.name} changed ${f}${e.version ? ` (v${e.version})` : ''}${e.branch && e.branch !== 'main' ? ` on ${e.branch}` : ''}${d.merged ? ' — auto-merged' : ''}`;
+      case 'file.edit_started': return `${e.actor.name} started editing ${f}${d.intent ? `: ${clip(d.intent, 100)}` : ''}${d.exclusive ? ' (exclusive)' : ''}`;
+      case 'file.changed': return `${e.actor.name} changed ${f}${e.version ? ` (v${e.version})` : ''}${e.branch && e.branch !== 'main' ? ` on ${e.branch}` : ''}${d.merged ? ' (auto-merged)' : ''}`;
       case 'file.edit_completed': return `${e.actor.name} finished editing ${f}${d.expired ? ' (reservation expired)' : ''}`;
       case 'file.deleted': return `${e.actor.name} deleted ${f}`;
       case 'file.reverted': return `${e.actor.name} reverted ${f} to v${d.toVersion}`;
@@ -181,11 +181,11 @@ class Workspace extends EventEmitter {
       case 'test.completed': return `Tests ${d.passed ? 'passed' : 'FAILED'} for task${tt || ' (workspace)'}`;
       case 'integration.checked': return `Integration check for task${tt}: ${d.state}${d.risks?.length ? `, ${d.risks.length} risk(s)` : ''}`;
       case 'note.added': return `${e.actor.name} noted (${d.kind}): ${clip(d.message, 180)}`;
-      case 'decision.recorded': return `Decision: ${clip(d.title, 80)} — ${clip(d.decision, 160)}`;
+      case 'decision.recorded': return `Decision: ${clip(d.title, 80)}. ${clip(d.decision, 160)}`;
       case 'blocker.reported': return `Blocker reported by ${e.actor.name}: ${clip(d.description, 160)}`;
       case 'blocker.resolved': return `Blocker resolved: ${clip(d.description, 120)}`;
-      case 'contract.updated': return `Contract "${d.name}" v${d.version} published by ${e.actor.name}${d.description ? ` — ${clip(d.description, 100)}` : ''}`;
-      case 'coordination.requested': return `${e.actor.name} → ${d.toName || 'all agents'}: ${clip(d.subject, 80)} — ${clip(d.message, 140)}`;
+      case 'contract.updated': return `Contract "${d.name}" v${d.version} published by ${e.actor.name}${d.description ? `: ${clip(d.description, 100)}` : ''}`;
+      case 'coordination.requested': return `${e.actor.name} → ${d.toName || 'all agents'}: ${clip(d.subject, 80)}. ${clip(d.message, 140)}`;
       default: return e.type;
     }
   }
@@ -673,7 +673,7 @@ class Workspace extends EventEmitter {
     this.overlapKeys.set(key, Date.now());
     const id = rid('cfl');
     const message = kind === 'integration_risk'
-      ? `${a.name} and ${others.map((o) => o.agentName).join(', ')} are changing ${p} on different branches — merge carefully`
+      ? `${a.name} and ${others.map((o) => o.agentName).join(', ')} are changing ${p} on different branches. Merge carefully.`
       : `${a.name} and ${others.map((o) => o.agentName).join(', ')} are editing ${p} at the same time`;
     this.state.conflicts[id] = { id, kind, path: p, agents: [a.id, ...others.map((o) => o.agentId)], message, status: kind === 'overlap' ? 'open' : 'watch', at: Date.now() };
     this.emitEvent('conflict.detected', a, { task: a.taskId, files: [p], branch: a.branch, data: { id, kind, message, agents: this.state.conflicts[id].agents } });
@@ -712,7 +712,7 @@ class Workspace extends EventEmitter {
       a.warned[p] = Date.now();
       this._overlap(a, p, sameBranch, 'overlap');
       const desc = sameBranch.map((o) => `${o.agentName}${o.taskTitle ? ` (task "${o.taskTitle}")` : ''}${o.intent ? `: ${o.intent}` : ''}`).join('; ');
-      return { decision: 'deny', reason: `TeamCode: heads up — ${desc} is also editing ${p} right now. Re-read the file, keep your change to the parts you own, and avoid restructuring their sections (use request_coordination if you need to). Retry your edit once you have accounted for this; it will be allowed.` };
+      return { decision: 'deny', reason: `TeamCode: heads up, ${desc} is also editing ${p} right now. Re-read the file, keep your change to the parts you own, and avoid restructuring their sections (use request_coordination if you need to). Retry your edit once you have accounted for this; it will be allowed.` };
     }
     if (this._reserve(a, p, 'shared', '')) this.emitEvent('file.edit_started', a, { task: a.taskId, files: [p], branch: a.branch, data: {} });
     return { decision: 'allow' };

@@ -49,7 +49,7 @@ class ProjectSession {
     const syncInfo = (extra = {}) => this.send('tc:sync', { ...this.sync.stats, ready: this.sync.ready, conflicts: [...this.sync.conflicts.keys()], ...extra });
     for (const ev of ['pushed', 'pulled', 'merged', 'reconciled']) this.sync.on(ev, () => syncInfo());
     this.sync.on('reconciling', () => syncInfo({ reconciling: true }));
-    this.sync.on('conflict', (c) => { syncInfo(); this.send('tc:toast', { kind: 'warn', text: `Edit conflict on ${c.path} — both versions kept. Resolve it in Context → Conflicts.` }); });
+    this.sync.on('conflict', (c) => { syncInfo(); this.send('tc:toast', { kind: 'warn', text: `Edit conflict on ${c.path}. Both versions kept; resolve it in Context → Conflicts.` }); });
     this.sync.on('skipped', (s) => this.send('tc:toast', { kind: 'warn', text: `${s.path} not synced (${s.reason})` }));
     this.sync.on('error', (e) => this.send('tc:toast', { kind: 'error', text: `Sync: ${e.message}` }));
     await this.sync.start();
@@ -170,7 +170,7 @@ class ProjectSession {
       if (overlapDirty.length) risks.push({ kind: 'working-copy', message: `Uncommitted changes in the main working copy overlap this branch: ${overlapDirty.slice(0, 6).join(', ')}. Commit them (Checkpoint) before merging.` });
       risks.push(...git.breakingChanges(await git.diff(root, t.baseCommit || 'HEAD', t.branch)));
       for (const d of t.dependsOn.map((id) => this.state.tasks[id]).filter(Boolean)) {
-        if (d.mode === 'isolated' && d.branch && d.branch !== 'main' && d.integration?.state !== 'merged') risks.push({ kind: 'dependency', message: `Built on top of "${d.title}", which isn't merged yet — merging this also brings in that work. Review and merge it first.` });
+        if (d.mode === 'isolated' && d.branch && d.branch !== 'main' && d.integration?.state !== 'merged') risks.push({ kind: 'dependency', message: `Built on top of "${d.title}", which isn't merged yet. Merging this also brings in that work. Review and merge it first.` });
       }
     } else if (t.mode !== 'isolated') {
       const changes = await this.call('taskChanges', { taskId });
