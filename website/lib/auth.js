@@ -128,9 +128,11 @@ class Accounts {
 
   async signOutEverywhere(user) { await this.db.query('delete from sessions where user_id = $1', [user.id]); }
 
-  async deleteAccount(user, { password }) {
+  // beforeDelete runs only once the password checks out (it removes the person's cloud projects).
+  async deleteAccount(user, { password }, beforeDelete) {
     if (!(await verifyPassword(String(password || ''), user.password_hash))) throw new HttpError(401, 'Password is incorrect');
-    await this.db.query('delete from users where id = $1', [user.id]); // sessions and app logins cascade
+    if (beforeDelete) await beforeDelete(user);
+    await this.db.query('delete from users where id = $1', [user.id]); // sessions, app logins and workspace records cascade
   }
 
   async sessions(user, currentToken) {

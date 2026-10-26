@@ -7,11 +7,15 @@
 //        GITHUB_TOKEN (fine-grained, Contents: read-only; only needed for a private repo)
 //        DATABASE_URL (Postgres; accounts are off without it in production)
 //        PUBLIC_URL (optional, e.g. https://teamcode.example.com; otherwise taken from the request)
+//        TEAMCODE_DATA, or a Railway volume (RAILWAY_VOLUME_MOUNT_PATH): where cloud team workspaces are kept.
+//        Without one, TeamCode cloud hosting is off. TEAMCODE_MAX_PROJECTS caps projects per account (default 5).
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const { connect } = require('./lib/db');
 const { Accounts } = require('./lib/auth');
+const { Workspaces } = require('./lib/workspaces');
+const { TeamServer } = require('../server/server');
 const { clientIp, RateLimiter, securityHeaders, HttpError, readJson, checkSameOrigin, parseCookies } = require('./lib/security');
 
 const PUBLIC = path.join(__dirname, 'public');
@@ -26,6 +30,12 @@ const PLATFORMS = {
   'mac-x64': { label: 'macOS (Intel)', match: (n) => /x64\.dmg$/i.test(n) },
 };
 
+function teamDataDir(env) {
+  if (env.TEAMCODE_DATA) return env.TEAMCODE_DATA;
+  if (env.RAILWAY_VOLUME_MOUNT_PATH) return path.join(env.RAILWAY_VOLUME_MOUNT_PATH, 'workspaces');
+  return null;
+}
+
 function createApp({ env = process.env, db = null } = {}) {
   const railwayRepo = env.RAILWAY_GIT_REPO_OWNER && env.RAILWAY_GIT_REPO_NAME ? `${env.RAILWAY_GIT_REPO_OWNER}/${env.RAILWAY_GIT_REPO_NAME}` : '';
   const REPO = env.GITHUB_REPO || railwayRepo || 'Piggy1213/teamcode';
@@ -34,6 +44,12 @@ function createApp({ env = process.env, db = null } = {}) {
   const publicOrigin = env.PUBLIC_URL ? new URL(env.PUBLIC_URL).origin : '';
   const accounts = db ? new Accounts(db) : null;
   const limiter = new RateLimiter();
+  // Cloud workspaces need both a place to keep files (a volume) and accounts to own them.
+  const dataDir = teamDataDir(env);
+  const team = dataDir && db ? new TeamServer({ dataDir, ownServer: false }) : null;
+  const workspaces = team ? new Workspaces({ db, team, maxPerUser: Number(env.TEAMCODE_MAX_PROJECTS) || 5 }) : null;
+  // Invites must point at the address people reach this site on.
+  const baseUrl = (req, secure) => publicOrigin || `${secure ? 'https' : 'http'}://${(trustProxy && req.headers['x-forwarded-host']) || req.headers.host}`;
   let cache = { at: 0, release: null, error: null };
 
   const github = (url, init = {}) => fetch(url, {
@@ -72,11 +88,21 @@ function createApp({ env = process.env, db = null } = {}) {
     };
     const cookie = (value, maxAge) => `${cookieName}=${value}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${secure ? '; Secure' : ''}`;
 
+    let raw;
+    try { raw = new URL(req.url, 'http://x').pathname; } catch { return send(400, 'Bad request'); }
+
+    // Team workspace traffic (desktop sync, agent hooks and MCP calls). Hooks fire on every agent tool call,
+    // so this gets its own, larger budget instead of the site-wide one. The workspace token guards each call.
+    if (team && (raw === '/team' || raw.startsWith('/team/'))) {
+      limit('team', 3000, 60000);
+      return team.handleRequest(req, res, raw.slice(5) || '/');
+    }
+
     if (!['GET', 'HEAD', 'POST'].includes(req.method)) return send(405, 'Method not allowed', { allow: 'GET, HEAD, POST' });
     limit('all', 600, 60000);
 
     let p;
-    try { p = decodeURIComponent(new URL(req.url, 'http://x').pathname); } catch { return send(400, 'Bad request'); }
+    try { p = decodeURIComponent(raw); } catch { return send(400, 'Bad request'); }
 
     if (p === '/health') return send(200, 'ok', { 'content-type': 'text/plain' });
 
@@ -106,7 +132,7 @@ function createApp({ env = process.env, db = null } = {}) {
     }
 
     if (p.startsWith('/api/')) {
-      if (p === '/api/config') return json(200, { accounts: !!accounts });
+      if (p === '/api/config') return json(200, { accounts: !!accounts, cloud: !!workspaces });
       if (!accounts) throw new HttpError(503, 'Accounts are not set up on this server yet');
 
       const bearer = /^Bearer (\S+)$/.exec(req.headers.authorization || '')?.[1];
@@ -124,6 +150,11 @@ function createApp({ env = process.env, db = null } = {}) {
         limit('me', 120, 60000);
         const s = await accounts.userForToken(sessionToken);
         return s ? json(200, { user: { id: s.user.id, email: s.user.email, name: s.user.name } }) : json(401, { error: 'Not signed in' });
+      }
+      if (req.method === 'GET' && p === '/api/workspaces') {
+        if (!workspaces) throw new HttpError(503, 'TeamCode cloud hosting isn\'t set up on this server');
+        limit('account', 60, 60000);
+        return json(200, { workspaces: await workspaces.list(await auth(), baseUrl(req, secure)) });
       }
       if (req.method === 'GET' && p === '/api/account/sessions') {
         limit('account', 60, 60000);
@@ -165,8 +196,19 @@ function createApp({ env = process.env, db = null } = {}) {
       if (p === '/api/account/delete') {
         fromBrowser();
         limit('account-write', 10, 15 * 60000);
-        await accounts.deleteAccount(await auth(), await readJson(req));
+        await accounts.deleteAccount(await auth(), await readJson(req), workspaces ? (u) => workspaces.removeAllFor(u) : null);
         return json(200, { ok: true }, bearer ? {} : { 'set-cookie': cookie('', 0) });
+      }
+      if (p === '/api/workspaces' || p === '/api/workspaces/delete') {
+        if (!workspaces) throw new HttpError(503, 'TeamCode cloud hosting isn\'t set up on this server');
+        fromBrowser();
+        if (p === '/api/workspaces') {
+          limit('ws-create', 10, 60 * 60000);
+          return json(201, await workspaces.create(await auth(), await readJson(req), baseUrl(req, secure)));
+        }
+        limit('account-write', 10, 15 * 60000);
+        await workspaces.remove(await auth(), await readJson(req));
+        return json(200, { ok: true });
       }
       // Desktop app sign-in. start and poll come from the app (no cookies involved); approve from the browser.
       if (p === '/api/app-login/start') {
@@ -215,11 +257,20 @@ function createApp({ env = process.env, db = null } = {}) {
     res.writeHead(status, { ...securityHeaders(false), 'cache-control': 'no-store', 'content-type': 'application/json; charset=utf-8', ...(known ? e.headers : {}) });
     res.end(JSON.stringify({ error: known ? e.message : 'Something went wrong. Try again.' }));
   }));
+  // Live team connections (desktop sync) upgrade to WebSocket at /team/ws.
+  server.on('upgrade', (req, sock, head) => {
+    let raw;
+    try { raw = new URL(req.url, 'http://x').pathname; } catch { return sock.destroy(); }
+    if (!team || !raw.startsWith('/team/ws')) return sock.destroy();
+    if (limiter.take(`team-ws:${clientIp(req, trustProxy)}`, 120, 60000)) return sock.destroy();
+    team.handleUpgrade(req, sock, head, raw.slice(5));
+  });
   // Drop slow or stalled clients instead of holding sockets open.
   server.headersTimeout = 15000;
   server.requestTimeout = 30000;
   server.keepAliveTimeout = 5000;
-  return { server, REPO, TOKEN, accounts };
+  const close = () => Promise.all([new Promise((r) => server.close(() => r())), team?.close()]);
+  return { server, REPO, TOKEN, accounts, team, workspaces, close };
 }
 
 if (require.main === module) {
@@ -227,10 +278,10 @@ if (require.main === module) {
     const PORT = Number(process.env.PORT || 3000);
     let db = null;
     try { db = await connect(); } catch (e) { console.error('database unavailable, accounts are off:', e.message); }
-    const { server, REPO, TOKEN, accounts } = createApp({ db });
+    const { server, REPO, TOKEN, accounts, workspaces } = createApp({ db });
     if (accounts) setInterval(() => accounts.cleanup().catch(() => {}), 60 * 60 * 1000).unref();
     server.listen(PORT, () => {
-      console.log(`TeamCode website on :${PORT} (releases from ${REPO}${TOKEN ? '' : ', no GITHUB_TOKEN set'}; accounts ${db ? (process.env.DATABASE_URL ? 'on' : 'on, in-memory database') : 'off'})`);
+      console.log(`TeamCode website on :${PORT} (releases from ${REPO}${TOKEN ? '' : ', no GITHUB_TOKEN set'}; accounts ${db ? (process.env.DATABASE_URL ? 'on' : 'on, in-memory database') : 'off'}; cloud hosting ${workspaces ? `on, data in ${teamDataDir(process.env)}` : 'off (attach a volume)'})`);
     });
   })();
 }

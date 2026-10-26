@@ -257,6 +257,35 @@ const handlers = {
     };
     return openSession(project);
   },
+  'cloud:status': async () => {
+    const cfg = await account.siteConfig();
+    const signedIn = !!account.state.user;
+    if (!account.siteUrl) return { available: false, signedIn, reason: 'This build of TeamCode has no website configured.' };
+    if (!cfg) return { available: false, signedIn, reason: 'Can\'t reach the TeamCode website right now.' };
+    if (!cfg.cloud) return { available: false, signedIn, reason: 'Cloud hosting isn\'t switched on for this TeamCode website yet.' };
+    return { available: true, signedIn, reason: signedIn ? null : 'Sign in to host projects on TeamCode cloud.' };
+  },
+  'cloud:list': async () => {
+    if (!account.state.user) return [];
+    const list = await account.listWorkspaces();
+    return list.map((w) => ({ ...w, token: undefined, open: config.projects.find((p) => p.workspace === w.workspace)?.root || null }));
+  },
+  // Host a folder on TeamCode cloud: create the workspace on the website, then connect as its first member.
+  // An empty cloud workspace takes the folder's files on first sync.
+  'project:openCloud': async ({ root }) => {
+    root = path.resolve(root);
+    if (!fs.existsSync(root)) throw new Error('Folder does not exist');
+    const w = await account.createWorkspace(path.basename(root));
+    return openSession({ root, name: w.name, role: 'member', cloud: true, owner: true, url: w.url, workspace: w.workspace, token: w.token });
+  },
+  // Open one of your cloud projects on this computer (for example a second laptop).
+  'project:joinCloud': async ({ workspace, root }) => {
+    const w = (await account.listWorkspaces()).find((x) => x.workspace === workspace);
+    if (!w) throw new Error('That cloud project wasn\'t found on your account.');
+    root = path.resolve(root);
+    fs.mkdirSync(root, { recursive: true });
+    return openSession({ root, name: w.name, role: 'member', cloud: true, owner: true, url: w.url, workspace: w.workspace, token: w.token });
+  },
   'project:join': async ({ invite, root }) => {
     const inv = decodeInvite(invite);
     root = path.resolve(root);
@@ -268,7 +297,7 @@ const handlers = {
     const p = config.projects.find((x) => x.root === root && x.workspace === workspace);
     if (!p) throw new Error('Project not found');
     if (!fs.existsSync(p.root)) throw new Error(`Folder ${p.root} no longer exists`);
-    if (p.role === 'member' && !(await ping(p.url))) throw new Error(`Can't reach the team server at ${p.url}. Ask the host to open TeamCode.`);
+    if (p.role === 'member' && !(await ping(p.url))) throw new Error(p.cloud ? `Can't reach TeamCode cloud at ${p.url}. Check your internet connection.` : `Can't reach the team server at ${p.url}. Ask the host to open TeamCode.`);
     return openSession(p);
   },
   'project:clone': async ({ url, parent }) => {

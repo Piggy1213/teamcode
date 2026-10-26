@@ -24,6 +24,13 @@ create table if not exists sessions (
   user_agent text
 );
 create index if not exists sessions_user_idx on sessions (user_id);
+create table if not exists workspaces (
+  id text primary key,
+  owner_id text not null references users(id) on delete cascade,
+  name text not null,
+  created_at timestamptz not null default now()
+);
+create index if not exists workspaces_owner_idx on workspaces (owner_id);
 create table if not exists app_logins (
   device_hash text primary key,
   user_code text not null unique,

@@ -153,20 +153,25 @@ function welcome() {
         ${accountLine()}
         ${updateNotice()}
         ${claudeBanner()}
-        <div class="small muted">The host's computer runs the shared workspace. For an always-on team, run <code>npm run server</code> on a server.</div>
+        <div class="small muted">Host a project on TeamCode cloud to keep it running when your computer is off, or on this computer to keep everything local.</div>
       </div>
     </aside>
     <main class="welcome-main">
       ${!u.name ? `<div class="col"><h4>Your name</h4><div class="row"><input id="w-name" placeholder="What should your team call you?" maxlength="40"><button class="btn primary" data-act="save-name">Continue</button></div></div>` : ''}
       <div class="col"><h4>Start</h4><div class="actions-list">
-        ${action('open-folder', 'folder', 'Open a project', 'Pick a local folder or repo. You host the workspace and invite your team.')}
+        ${action('open-folder', 'folder', 'Open a project', 'Pick a local folder or repo, host it on TeamCode cloud or this computer, and invite your team.')}
         ${action('join-modal', 'users', 'Join your team', 'Paste an invite code. Files sync into a folder you choose.')}
         ${action('clone-modal', 'download', 'Clone from Git', 'Clone a GitHub or GitLab repository and open it as a project.')}
       </div></div>
+      ${(S.cloudProjects || []).filter((w) => !w.open).length ? `<div class="col"><h4>Your cloud projects</h4><div class="recent">${S.cloudProjects.filter((w) => !w.open).map((w) => `
+        <div class="recent-item" style="grid-template-columns:28px 1fr auto">
+          ${avatar(w.name)}<div style="min-width:0"><b>${esc(w.name)}</b><div class="faint small">On TeamCode cloud, not on this computer yet</div></div>
+          <button class="btn sm" data-act="cloud-open-here" data-ws="${esc(w.workspace)}" data-name="${esc(w.name)}">Open here…</button>
+        </div>`).join('')}</div></div>` : ''}
       ${recent.length ? `<div class="col"><h4>Recent</h4><div class="recent">${recent.map((p) => `
         <div class="recent-item" data-act="open-recent" data-root="${esc(p.root)}" data-ws="${esc(p.workspace)}">
           ${avatar(p.name)}<div style="min-width:0"><b>${esc(p.name)}</b><div class="faint small ellipsis mono">${esc(p.root)}</div></div>
-          <span class="tag">${p.role === 'host' ? 'Host' : 'Member'}</span>
+          <span class="tag">${p.cloud ? 'Cloud' : p.role === 'host' ? 'Host' : 'Member'}</span>
           <span class="faint small">${ago(p.lastOpened)}</span>
         </div>`).join('')}</div></div>` : ''}
     </main>
@@ -207,7 +212,7 @@ function shell() {
   return `<div class="shell">
     <aside class="sidebar">
       <div class="side-head">
-        <button class="proj-switch" data-act="close-project" title="${esc(p.root)}. Click for all projects.">${brandMark(26)}<span class="spacer"><span class="proj ellipsis" style="display:block">${esc(p.name)}</span><span class="sub">${p.role === 'host' ? (p.shared ? 'Hosting, shared' : 'Hosting') : 'Joined'}</span></span></button>
+        <button class="proj-switch" data-act="close-project" title="${esc(p.root)}. Click for all projects.">${brandMark(26)}<span class="spacer"><span class="proj ellipsis" style="display:block">${esc(p.name)}</span><span class="sub">${p.cloud ? 'TeamCode cloud' : p.role === 'host' ? (p.shared ? 'Hosting, shared' : 'Hosting') : 'Joined'}</span></span></button>
       </div>
       ${nav}
       <div class="spacer"></div>
@@ -771,7 +776,51 @@ async function openProject(p) {
   S.gitInfo = null;
   render();
 }
-A['open-folder'] = async () => { const root = await api('app:pickFolder', {}); if (root) openProject({ root }); };
+A['open-folder'] = async () => { const root = await api('app:pickFolder', {}); if (root) chooseHosting(root); };
+
+// Opening a folder for the first time: choose where its team workspace runs.
+async function chooseHosting(root) {
+  if (!me().name) return toast('Enter your name first', 'warn');
+  const known = S.init.projects.find((p) => p.root === root);
+  if (known) return A['open-recent']({ root: known.root, ws: known.workspace });
+  const cloud = await api('cloud:status').catch(() => ({ available: false, reason: 'Can\'t reach TeamCode cloud right now.' }));
+  const cloudOk = cloud.available && cloud.signedIn;
+  const name = root.split(/[\\/]/).filter(Boolean).pop();
+  modal(`${mhead(`Open ${esc(name)}`, 'folder')}<div class="modal-body">
+    <div class="small muted mono ellipsis">${esc(root)}</div>
+    <div class="col" style="gap:8px"><h4>Where should the team workspace run?</h4>
+      <label class="choice ${cloud.available ? '' : 'off'}"><input type="radio" name="hosting" value="cloud" ${cloudOk ? 'checked' : ''} ${cloud.available ? '' : 'disabled'}>
+        <span><b>TeamCode cloud</b><span class="muted small">Always on. Teammates join from anywhere, even when your computer is off.</span>
+        ${cloud.reason ? `<span class="small" style="color:var(--amber)">${esc(cloud.reason)}</span>` : ''}${cloud.available && !cloud.signedIn ? '<span><button class="btn sm" data-act="account-login">Sign in</button></span>' : ''}</span></label>
+      <label class="choice"><input type="radio" name="hosting" value="local" ${cloudOk ? '' : 'checked'}>
+        <span><b>This computer</b><span class="muted small">Runs inside TeamCode here. Teammates can join while it's open, on your network or through a tunnel.</span></span></label>
+    </div></div>
+    <div class="modal-foot"><button class="btn" data-act="modal-close">Cancel</button><button class="btn primary" data-act="open-go" data-root="${esc(root)}">Open project</button></div>`);
+}
+A['open-go'] = async (d, el) => {
+  const where = document.querySelector('input[name="hosting"]:checked')?.value || 'local';
+  if (where === 'cloud' && !S.account?.user) return toast('Sign in first, then press Open project.', 'warn');
+  el.disabled = true; el.innerHTML = `<span class="spinner"></span> ${where === 'cloud' ? 'Creating cloud workspace…' : 'Opening…'}`;
+  const r = await run(() => api(where === 'cloud' ? 'project:openCloud' : 'project:open', { root: d.root }));
+  if (!r) { el.disabled = false; el.textContent = 'Open project'; return; }
+  closeModal();
+  if (where === 'cloud') toast('Hosted on TeamCode cloud. Your files are uploading.', 'ok');
+  S.project = r; S.view = 'agents'; S.review = { sel: null, tab: 'tasks', data: {}, busy: null }; S.gitInfo = null;
+  render();
+};
+A['cloud-open-here'] = async (d) => {
+  const root = await api('app:pickFolder', { title: `Folder for ${d.name}` });
+  if (!root) return;
+  const r = await run(() => api('project:joinCloud', { workspace: d.ws, root }));
+  if (!r) return;
+  S.project = r; S.view = 'agents'; S.review = { sel: null, tab: 'tasks', data: {}, busy: null }; S.gitInfo = null;
+  render();
+};
+async function loadCloudProjects() {
+  if (!S.account?.user) { S.cloudProjects = []; return; }
+  S.cloudProjects = await api('cloud:list').catch(() => []);
+  if (!S.project) render();
+}
 A['open-recent'] = async (d) => {
   if (!me().name) return toast('Enter your name first', 'warn');
   const r = await run(() => api('project:reopen', { root: d.root, workspace: d.ws }));
@@ -811,9 +860,9 @@ A['clone-go'] = async (d, el) => {
   el.disabled = true; el.innerHTML = '<span class="spinner"></span> Cloning…';
   const root = await run(() => api('project:clone', { url, parent }));
   if (!root) { el.disabled = false; el.textContent = 'Clone & open'; return; }
-  closeModal(); openProject({ root });
+  closeModal(); chooseHosting(root);
 };
-A['close-project'] = async () => { await api('project:close'); S.project = null; S.state = null; S.events = []; S.drawer = null; S.init = await api('app:init'); render(); };
+A['close-project'] = async () => { await api('project:close'); S.project = null; S.state = null; S.events = []; S.drawer = null; S.init = await api('app:init'); render(); loadCloudProjects(); };
 
 A.invite = async () => { const info = await run(() => api('project:invite', { share: false })); if (info) inviteModal(info); };
 A['invite-share'] = async (d, el) => { el.disabled = true; el.innerHTML = '<span class="spinner"></span>'; const info = await run(() => api('project:invite', { share: true })); if (info) { S.project.shared = true; inviteModal(info); render(); } };
@@ -1094,7 +1143,7 @@ window.tc.on('tc:agentStarted', async ({ agentId }) => {
 window.tc.on('tc:account', (a) => {
   const signedIn = !S.account?.user && a.user;
   S.account = a;
-  if (signedIn) { S.init.user = { ...S.init.user, name: a.user.name }; toast(`Signed in as ${a.user.name}`, 'ok'); }
+  if (signedIn) { S.init.user = { ...S.init.user, name: a.user.name }; toast(`Signed in as ${a.user.name}`, 'ok'); loadCloudProjects(); }
   render();
 });
 window.tc.on('tc:agentLog', ({ agentId, entry }) => {
@@ -1109,6 +1158,7 @@ setInterval(() => { if (S.project && !$('#modal-root').innerHTML) render(); }, 3
   S.init = await api('app:init');
   S.update = S.init.update;
   S.account = S.init.account;
+  loadCloudProjects();
   if (S.init.current) {
     S.project = S.init.current;
     const st = await api('ws:state');

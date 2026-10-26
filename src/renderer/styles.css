@@ -178,6 +178,12 @@ label.check { display: flex; gap: 8px; align-items: center; cursor: pointer; }
 .recent-item:hover { background: var(--hover); }
 .side-foot { margin-top: auto; display: flex; flex-direction: column; gap: 10px; }
 
+/* A selectable option card (e.g. where a project is hosted). */
+.choice { display: flex; gap: 12px; align-items: flex-start; padding: 12px 14px; border: 1px solid var(--border-2); border-radius: var(--r-lg); cursor: pointer; background: var(--panel); }
+.choice:has(input:checked) { border-color: var(--text); box-shadow: 0 0 0 1px var(--text); }
+.choice input { margin-top: 3px; accent-color: var(--ink); }
+.choice > span { display: flex; flex-direction: column; gap: 3px; }
+.choice.off { opacity: .6; cursor: default; }
 .banner { border-radius: var(--r-lg); padding: 10px 12px; display: flex; gap: 10px; align-items: center; border: 1px solid var(--border); background: var(--panel); box-shadow: var(--shadow); }
 .banner > svg.i { width: 16px; height: 16px; }
 .banner.warn > svg.i { color: var(--amber); }

@@ -98,6 +98,25 @@ class Account {
     return this.state;
   }
 
+  // What the website offers (accounts, cloud hosting). Cached briefly; null when the site can't be reached.
+  async siteConfig() {
+    if (!this.siteUrl) return null;
+    if (this._cfg && Date.now() - this._cfg.at < 60000) return this._cfg.value;
+    const value = await this.api('/api/config').catch(() => null);
+    this._cfg = { at: Date.now(), value };
+    return value;
+  }
+
+  _authed() {
+    const t = this.token();
+    if (!t || !this.config.account?.user) throw new Error('Sign in to TeamCode first (Settings, Account).');
+    return t;
+  }
+
+  createWorkspace(name) { return this.api('/api/workspaces', { method: 'POST', body: { name }, auth: this._authed() }); }
+
+  async listWorkspaces() { return (await this.api('/api/workspaces', { auth: this._authed() })).workspaces; }
+
   async logout() {
     const t = this.token();
     this.clear();

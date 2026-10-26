@@ -2,6 +2,8 @@
 // HTTP + WebSocket front-end for the Coordinator.
 //   HTTP  POST /api/<workspace>/<op>   (Authorization: Bearer <token>)  : used by MCP servers and hooks
 //   WS    /ws                           : used by desktop clients for live events and file sync
+// It runs its own http.Server (desktop app, standalone server), or with { ownServer: false } it is mounted
+// inside another server (the TeamCode website) that passes requests in with the mount prefix removed.
 const http = require('http');
 const crypto = require('crypto');
 const { WebSocketServer } = require('ws');
@@ -15,16 +17,15 @@ function safeEqual(a, b) {
 }
 
 class TeamServer {
-  constructor({ dataDir, coordinator } = {}) {
+  constructor({ dataDir, coordinator, ownServer = true } = {}) {
     this.coordinator = coordinator || new Coordinator({ dataDir });
     this.clients = new Set();
     this.subscribed = new Set();
-    this.http = http.createServer((req, res) => this._onHttp(req, res));
     this.wss = new WebSocketServer({ noServer: true, maxPayload: 16 * 1024 * 1024 });
-    this.http.on('upgrade', (req, sock, head) => {
-      if (!req.url.startsWith('/ws')) return sock.destroy();
-      this.wss.handleUpgrade(req, sock, head, (ws) => this._onSocket(ws));
-    });
+    if (ownServer) {
+      this.http = http.createServer((req, res) => this.handleRequest(req, res));
+      this.http.on('upgrade', (req, sock, head) => this.handleUpgrade(req, sock, head));
+    }
     this._ping = setInterval(() => {
       for (const c of this.clients) {
         if (!c.alive) { c.ws.terminate(); continue; }
@@ -46,7 +47,21 @@ class TeamServer {
     clearInterval(this._ping);
     for (const c of this.clients) c.ws.terminate();
     this.coordinator.close();
+    if (!this.http) return Promise.resolve();
     return new Promise((r) => { this.http.close(() => r()); this.http.closeAllConnections?.(); });
+  }
+
+  // `url` is the request path relative to where this server is mounted (defaults to req.url).
+  handleUpgrade(req, sock, head, url = req.url) {
+    if (!url.startsWith('/ws')) return sock.destroy();
+    this.wss.handleUpgrade(req, sock, head, (ws) => this._onSocket(ws));
+  }
+
+  // Deletes a workspace and disconnects everyone in it.
+  removeWorkspace(id) {
+    for (const c of this.clients) if (c.workspace?.id === id) c.ws.terminate();
+    this.subscribed.delete(id);
+    this.coordinator.removeWorkspace(id);
   }
 
   _workspace(id, token) {
@@ -71,15 +86,20 @@ class TeamServer {
     }
   }
 
-  _onHttp(req, res) {
+  handleRequest(req, res, url = req.url) {
     const send = (code, obj) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(obj)); };
-    if (req.method === 'GET' && (req.url === '/' || req.url === '/health')) return send(200, { ok: true, app: 'teamcode', workspaces: this.coordinator.workspaces.size });
-    const m = req.url.match(/^\/api\/([\w-]+)\/(\w+)$/);
+    if (req.method === 'GET' && (url === '/' || url === '/health')) return send(200, { ok: true, app: 'teamcode' });
+    const m = url.match(/^\/api\/([\w-]+)\/(\w+)$/);
     if (req.method !== 'POST' || !m) return send(404, { ok: false, error: 'Not found' });
-    let size = 0;
+    let size = 0, tooBig = false;
     const chunks = [];
-    req.on('data', (c) => { size += c.length; if (size > MAX_BODY) req.destroy(); else chunks.push(c); });
+    req.on('data', (c) => {
+      size += c.length;
+      if (size > MAX_BODY && !tooBig) { tooBig = true; send(413, { ok: false, error: 'Request too large', code: 'too_large' }); req.destroy(); }
+      else if (!tooBig) chunks.push(c);
+    });
     req.on('end', () => {
+      if (tooBig) return;
       try {
         const token = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
         const w = this._workspace(m[1], token);

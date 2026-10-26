@@ -84,12 +84,12 @@ class Workspace extends EventEmitter {
   }
 
   _saveSoon() {
-    if (!this.dataDir || this._saveTimer) return;
+    if (!this.dataDir || this._saveTimer || this._removed) return;
     this._saveTimer = setTimeout(() => { this._saveTimer = null; this.saveNow(); }, 400);
   }
 
   saveNow() {
-    if (!this.dataDir) return;
+    if (!this.dataDir || this._removed) return;
     const delivered = {};
     const keys = [...this.delivered.keys()].slice(-3000);
     for (const k of keys) delivered[k] = [...this.delivered.get(k)];
@@ -133,7 +133,7 @@ class Workspace extends EventEmitter {
     };
     e.summary = this._describe(e);
     this.events.push(e);
-    if (this.dataDir) fs.appendFileSync(path.join(this.dataDir, 'events.jsonl'), JSON.stringify(e) + '\n');
+    if (this.dataDir && !this._removed) fs.appendFileSync(path.join(this.dataDir, 'events.jsonl'), JSON.stringify(e) + '\n');
     this._saveSoon();
     this.emit('event', e);
     return e;
@@ -1255,6 +1255,16 @@ class Coordinator {
   }
 
   get(id) { return this.workspaces.get(id) || null; }
+
+  removeWorkspace(id) {
+    const w = this.workspaces.get(id);
+    if (!w) return false;
+    clearTimeout(w._saveTimer);
+    w._removed = true;
+    this.workspaces.delete(id);
+    if (this.dataDir) fs.rmSync(path.join(this.dataDir, id), { recursive: true, force: true });
+    return true;
+  }
 
   close() {
     clearInterval(this._sweeper);

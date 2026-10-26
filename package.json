@@ -22,7 +22,7 @@
   "dependencies": {
     "chokidar": "^3.6.0",
     "ignore": "^5.3.2",
-    "ws": "^8.18.0"
+    "ws": "^8.22.0"
   },
   "devDependencies": {
     "electron": "^33.2.1",

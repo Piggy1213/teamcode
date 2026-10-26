@@ -81,6 +81,10 @@ async function run(win, { handlers, getSession, config }) {
     await shot('12-new-task');
     await js('closeModal(); A.invite();');
     await shot('13-invite');
+    await js('closeModal(); chooseHosting(S.project.root.replace(/[^/]+$/, "new-project"));');
+    await shot('15-open-project');
+    await js('closeModal(); S.view = "settings"; renderNow(); document.querySelector("[data-scroll=settings]").scrollTop = 99999;');
+    await shot('16-settings-claude-code');
     if (process.env.TEAMCODE_SITE_URL) {
       await js('closeModal(); api("update:check").then((u) => { S.update = u; S.view = "settings"; renderNow(); })');
       await sleep(2500);

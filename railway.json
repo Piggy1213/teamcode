@@ -3,7 +3,10 @@
   "build": {
     "builder": "DOCKERFILE",
     "dockerfilePath": "website/Dockerfile",
-    "watchPatterns": ["website/**"]
+    "watchPatterns": [
+      "website/**",
+      "server/**"
+    ]
   },
   "deploy": {
     "healthcheckPath": "/health",
