@@ -221,3 +221,11 @@ scripts/       smoke test, icon generator
 - The host's server only listens on the network after you click **Share**. Before that it is bound to `127.0.0.1`.
 - For teams that connect over the internet, put the server behind HTTPS, for example with a tunnel or a reverse proxy.
 - By default agents use Claude Code's `acceptEdits` permission mode. "Full auto" (`bypassPermissions`) lets agents run commands without asking. Only turn it on for projects you trust.
+
+## Releases & download website
+
+- **Installers** are built by GitHub Actions (`.github/workflows/release.yml`) when you push a version tag:
+  `npm version patch && git push --follow-tags` → tests run, then Windows (`.exe`) and macOS (`.dmg`, Apple Silicon + Intel) installers are attached to a GitHub release.
+- **Website** (`website/`) is a zero-dependency Node server for Railway. It shows the landing page and serves the latest release's installers from this private repo via `/download/windows`, `/download/mac-arm64`, `/download/mac-x64` (redirects to short-lived signed GitHub URLs).
+  Railway variables: `GITHUB_REPO=lbakes111/teamcode`, `GITHUB_TOKEN=<fine-grained token with read-only Contents access to this repo>`.
+- Installers are not code-signed yet: Windows shows a SmartScreen prompt and macOS needs `xattr -cr /Applications/TeamCode.app` (the site explains both). Signing needs a Windows code-signing certificate and an Apple Developer ID.

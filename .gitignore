@@ -1,4 +1,5 @@
 node_modules/
 dist/
 smoke-shots/
+.claude/
 .DS_Store

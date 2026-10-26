@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TeamCode — your team and its AI agents, on one codebase</title>
+  <meta name="description" content="TeamCode is a desktop app for Mac and Windows. Your whole dev team and everyone's Claude Code agents work on the same project at once, see each other's changes in real time, and merge safely.">
+  <link rel="icon" href="/img/icon.png">
+  <meta property="og:title" content="TeamCode">
+  <meta property="og:description" content="Your team and its AI agents, working on one codebase at the same time.">
+  <meta property="og:image" content="/img/agents.png">
+  <style>
+    :root {
+      --bg: #0b0d12; --bg2: #11141b; --panel: #161a22; --border: #262b36; --text: #eceef3; --muted: #a0a7b4; --faint: #6b7280;
+      --accent: #8b6cff; --accent2: #4f7dff; --cyan: #2fb7e5; --green: #3ccf7c; --amber: #f0b43c;
+    }
+    @media (prefers-color-scheme: light) {
+      :root { --bg: #f7f8fb; --bg2: #ffffff; --panel: #ffffff; --border: #e3e6ec; --text: #14171f; --muted: #5d6573; --faint: #8a919d; --accent: #6d4aff; }
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; -webkit-font-smoothing: antialiased; }
+    a { color: inherit; }
+    .wrap { width: min(1120px, 100% - 32px); margin: 0 auto; }
+    nav { position: sticky; top: 0; z-index: 10; backdrop-filter: blur(12px); background: color-mix(in srgb, var(--bg) 80%, transparent); border-bottom: 1px solid var(--border); }
+    nav .wrap { display: flex; align-items: center; gap: 22px; height: 62px; }
+    .brand { display: flex; align-items: center; gap: 10px; font-weight: 750; font-size: 18px; text-decoration: none; }
+    .brand img { width: 30px; height: 30px; }
+    nav .links { display: flex; gap: 20px; margin-left: auto; font-size: 14.5px; }
+    nav .links a { text-decoration: none; color: var(--muted); }
+    nav .links a:hover { color: var(--text); }
+    .btn { display: inline-flex; align-items: center; gap: 10px; padding: 13px 22px; border-radius: 12px; font-weight: 650; text-decoration: none; border: 1px solid var(--border); background: var(--panel); cursor: pointer; font-size: 15.5px; transition: transform .12s, box-shadow .12s, opacity .12s; }
+    .btn:hover { transform: translateY(-1px); }
+    .btn.primary { background: linear-gradient(135deg, var(--accent), var(--accent2)); color: #fff; border: none; box-shadow: 0 10px 30px -10px var(--accent); }
+    .btn.small { padding: 8px 14px; font-size: 14px; border-radius: 10px; }
+    .btn.disabled { opacity: .5; pointer-events: none; }
+    header.hero { padding: 84px 0 40px; text-align: center; position: relative; overflow: hidden; }
+    header.hero::before { content: ""; position: absolute; inset: -40% -10% auto; height: 680px; background: radial-gradient(closest-side, color-mix(in srgb, var(--accent) 35%, transparent), transparent 70%); z-index: -1; }
+    .eyebrow { display: inline-flex; gap: 8px; align-items: center; padding: 5px 12px; border-radius: 99px; border: 1px solid var(--border); background: var(--panel); color: var(--muted); font-size: 13.5px; }
+    .eyebrow b { color: var(--green); font-weight: 600; }
+    h1 { font-size: clamp(36px, 6vw, 64px); line-height: 1.06; letter-spacing: -.035em; margin: 22px auto 18px; max-width: 900px; }
+    h1 .grad { background: linear-gradient(90deg, var(--accent), var(--cyan)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+    .lede { font-size: clamp(17px, 2.2vw, 20px); color: var(--muted); max-width: 720px; margin: 0 auto 32px; }
+    .cta { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+    .meta { color: var(--faint); font-size: 13.5px; margin-top: 14px; }
+    .meta a { color: var(--muted); }
+    .shot { margin: 56px auto 0; border-radius: 16px; border: 1px solid var(--border); overflow: hidden; box-shadow: 0 40px 100px -30px rgba(0,0,0,.6); max-width: 1080px; }
+    .shot img { display: block; width: 100%; height: auto; }
+    section { padding: 84px 0; }
+    section h2 { font-size: clamp(28px, 4vw, 40px); letter-spacing: -.025em; margin: 0 0 12px; line-height: 1.15; }
+    section .sub { color: var(--muted); max-width: 680px; margin: 0 0 40px; font-size: 17.5px; }
+    .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+    .card { background: var(--panel); border: 1px solid var(--border); border-radius: 16px; padding: 24px; }
+    .card .ico { font-size: 26px; }
+    .card h3 { margin: 10px 0 6px; font-size: 18px; }
+    .card p { margin: 0; color: var(--muted); font-size: 15px; }
+    .split { display: grid; grid-template-columns: 1fr 1.2fr; gap: 48px; align-items: center; }
+    .split.rev { grid-template-columns: 1.2fr 1fr; }
+    .split img { width: 100%; border-radius: 14px; border: 1px solid var(--border); }
+    .points { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 14px; }
+    .points li { display: flex; gap: 12px; color: var(--muted); }
+    .points li b { color: var(--text); }
+    .points li span:first-child { flex: none; }
+    .steps { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; counter-reset: s; }
+    .step { counter-increment: s; background: var(--panel); border: 1px solid var(--border); border-radius: 16px; padding: 22px; }
+    .step::before { content: counter(s); display: grid; place-items: center; width: 32px; height: 32px; border-radius: 10px; background: linear-gradient(135deg, var(--accent), var(--accent2)); color: #fff; font-weight: 700; margin-bottom: 12px; }
+    .step h3 { margin: 0 0 6px; font-size: 16.5px; }
+    .step p { margin: 0; color: var(--muted); font-size: 14.5px; }
+    .download { background: var(--bg2); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+    .dl-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+    .dl { display: flex; flex-direction: column; gap: 10px; align-items: flex-start; }
+    .dl .os { font-size: 30px; }
+    .dl .file { color: var(--faint); font-size: 13px; font-family: ui-monospace, Consolas, monospace; word-break: break-all; }
+    details { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 14px 18px; margin-top: 12px; }
+    details summary { cursor: pointer; font-weight: 600; }
+    details p, details li { color: var(--muted); font-size: 15px; }
+    code { font-family: ui-monospace, Consolas, monospace; font-size: 13.5px; background: var(--bg2); border: 1px solid var(--border); border-radius: 6px; padding: 1px 6px; }
+    .req { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 24px; }
+    .req span { border: 1px solid var(--border); border-radius: 99px; padding: 5px 12px; font-size: 13.5px; color: var(--muted); background: var(--panel); }
+    footer { padding: 36px 0 56px; color: var(--faint); font-size: 14px; }
+    footer .wrap { display: flex; gap: 16px; flex-wrap: wrap; align-items: center; }
+    @media (max-width: 900px) {
+      .grid, .dl-grid { grid-template-columns: 1fr; }
+      .steps { grid-template-columns: 1fr 1fr; }
+      .split, .split.rev { grid-template-columns: 1fr; gap: 28px; }
+      nav .links a:not(.btn) { display: none; }
+    }
+    @media (max-width: 520px) { .steps { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <nav><div class="wrap">
+    <a class="brand" href="/"><img src="/img/icon.png" alt="">TeamCode</a>
+    <div class="links">
+      <a href="#features">Features</a><a href="#how">How it works</a><a href="#faq">FAQ</a>
+      <a class="btn small primary" href="#download">Download</a>
+    </div>
+  </div></nav>
+
+  <header class="hero"><div class="wrap">
+    <span class="eyebrow"><b>●</b> Runs on your own Claude Code · Mac &amp; Windows</span>
+    <h1>Your whole team and all its AI agents, <span class="grad">on one codebase, live.</span></h1>
+    <p class="lede">TeamCode puts everyone's Claude Code agents on the same project at once. Every agent sees what the others are changing, builds against the interfaces they publish, and hands its work back for review before it's merged. Nothing gets silently overwritten.</p>
+    <div class="cta">
+      <a class="btn primary" id="hero-dl" href="#download">⬇ Download TeamCode</a>
+      <a class="btn" href="#how">See how it works</a>
+    </div>
+    <div class="meta" id="hero-meta">Free · Windows 10+ and macOS 12+</div>
+    <div class="shot"><img src="/img/agents.png" alt="TeamCode's multi-agent panel showing three AI agents working in parallel with live activity" width="1344" height="821"></div>
+  </div></header>
+
+  <section id="features"><div class="wrap">
+    <h2>Built for teams of humans <em>and</em> agents</h2>
+    <p class="sub">Coding assistants usually work alone. TeamCode gives them shared awareness so they act like one dev team instead of tripping over each other.</p>
+    <div class="grid">
+      <div class="card"><div class="ico">🔄</div><h3>Real-time sync</h3><p>Files sync between everyone's folders as they're saved. Edits to different parts of the same file merge automatically.</p></div>
+      <div class="card"><div class="ico">🤖</div><h3>Agents that know about each other</h3><p>Each agent knows which tasks, files and decisions the others are working on, and is told when something it relies on changes.</p></div>
+      <div class="card"><div class="ico">✨</div><h3>Plan a feature, run it in parallel</h3><p>Describe a feature. Claude splits it into tasks with dependencies, runs independent ones at the same time, and starts the rest when they're unblocked.</p></div>
+      <div class="card"><div class="ico">📐</div><h3>Shared interface contracts</h3><p>Agents publish the APIs they're building so dependent work can start straight away, and they're told if a contract changes.</p></div>
+      <div class="card"><div class="ico">🛡️</div><h3>No silent overwrites</h3><p>Version checks before every edit, isolated git branches, overlap warnings, and conflict records that keep both versions.</p></div>
+      <div class="card"><div class="ico">👀</div><h3>Review before merge</h3><p>Per-task diffs, test runs, conflict and API-break checks, then approve and merge, reject, or revert. Finishing a task doesn't mean it's merged.</p></div>
+    </div>
+  </div></section>
+
+  <section style="padding-top:0"><div class="wrap split">
+    <div>
+      <h2>See the plan before anything runs</h2>
+      <p class="sub" style="margin-bottom:24px">The parallel plan groups tasks into waves: what can run now, what's waiting on which dependency, and which tasks shouldn't run together because they touch the same files.</p>
+      <ul class="points">
+        <li><span>🟢</span><span><b>Independent tasks start at once,</b> up to the number of agents you allow per computer.</span></li>
+        <li><span>⏳</span><span><b>Dependent tasks wait</b> for the work they need, then start from it automatically.</span></li>
+        <li><span>⚠️</span><span><b>Overlap warnings</b> flag tasks that expect to edit the same files.</span></li>
+      </ul>
+    </div>
+    <img src="/img/plan.png" alt="Parallel plan view grouping tasks into waves" loading="lazy">
+  </div></section>
+
+  <section style="padding-top:0"><div class="wrap split rev">
+    <img src="/img/review.png" alt="Review view with task, tests, integration and approval gates" loading="lazy">
+    <div>
+      <h2>Merge with confidence</h2>
+      <p class="sub" style="margin-bottom:24px">Each agent works on its own git branch. Before anything reaches your main code, you see exactly what changed and whether it's safe to merge.</p>
+      <ul class="points">
+        <li><span>🧪</span><span><b>Run your tests</b> on the agent's branch with one click.</span></li>
+        <li><span>🔍</span><span><b>Integration checks</b> catch merge conflicts, removed or changed APIs, and contract drift.</span></li>
+        <li><span>↩️</span><span><b>Reject or revert</b> any task without losing anyone else's work.</span></li>
+      </ul>
+    </div>
+  </div></section>
+
+  <section id="how" style="padding-top:0"><div class="wrap">
+    <h2>Up and running in minutes</h2>
+    <p class="sub">Everyone uses their own Claude Code subscription. TeamCode coordinates the work.</p>
+    <div class="steps">
+      <div class="step"><h3>Open your project</h3><p>Pick a local folder or repo, or clone one from GitHub.</p></div>
+      <div class="step"><h3>Invite your team</h3><p>Share an invite code. Teammates join, and the files sync to their machines.</p></div>
+      <div class="step"><h3>Plan &amp; assign</h3><p>Add tasks yourself or let Claude plan a feature. Agents start as soon as their tasks are ready.</p></div>
+      <div class="step"><h3>Review &amp; merge</h3><p>Watch every agent in the Agents panel, then review, test and merge their work.</p></div>
+    </div>
+    <div class="req"><span>Claude Code (Pro, Max, Team or API)</span><span>git 2.38+</span><span>Windows 10 / 11</span><span>macOS 12+</span><span>Node.js (recommended)</span></div>
+  </div></section>
+
+  <section id="download" class="download"><div class="wrap">
+    <h2>Download TeamCode</h2>
+    <p class="sub" id="dl-version">Checking for the latest version…</p>
+    <div class="dl-grid">
+      <div class="card dl"><div class="os">🪟</div><h3 style="margin:0">Windows</h3><div class="file" data-file="windows">64-bit installer</div><a class="btn primary disabled" data-dl="windows" href="/download/windows">Download for Windows</a></div>
+      <div class="card dl"><div class="os">🍎</div><h3 style="margin:0">macOS — Apple Silicon</h3><div class="file" data-file="mac-arm64">M1, M2, M3, M4 and later</div><a class="btn primary disabled" data-dl="mac-arm64" href="/download/mac-arm64">Download for Apple Silicon</a></div>
+      <div class="card dl"><div class="os">🍎</div><h3 style="margin:0">macOS — Intel</h3><div class="file" data-file="mac-x64">Intel Macs</div><a class="btn disabled" data-dl="mac-x64" href="/download/mac-x64">Download for Intel Mac</a></div>
+    </div>
+    <details><summary>Windows says "Windows protected your PC"</summary><p>TeamCode isn't code-signed yet, so SmartScreen warns about it. Click <b>More info</b> → <b>Run anyway</b>.</p></details>
+    <details><summary>macOS says the app "can't be opened" or "is damaged"</summary><p>TeamCode isn't notarized by Apple yet. Drag it to Applications, then run this once in Terminal:</p><p><code>xattr -cr /Applications/TeamCode.app</code></p><p>Or right-click the app, choose <b>Open</b>, and confirm. On macOS 15+, use <b>System Settings → Privacy &amp; Security → Open Anyway</b>.</p></details>
+  </div></section>
+
+  <section id="faq"><div class="wrap">
+    <h2>FAQ</h2>
+    <details><summary>Do I need to pay for TeamCode?</summary><p>No. TeamCode is free. Each person uses their own Claude Code subscription or API key, and agent usage counts against that.</p></details>
+    <details><summary>Where does my code go?</summary><p>Files sync directly between your team's computers through the workspace server, which is either the host's TeamCode app or a server you run yourself. Each workspace is protected by a secret token in its invite code.</p></details>
+    <details><summary>Can teammates in other places join?</summary><p>Yes. On the same network, invite codes work straight away. For remote teams, run the TeamCode workspace server on an always-on host and share its invite code.</p></details>
+    <details><summary>Can other AI tools join?</summary><p>Any MCP-capable agent can join a workspace through the TeamCode MCP server and coordinate with the rest of the team.</p></details>
+    <details><summary>Can agents change things without me knowing?</summary><p>Agents only edit files by default, and every change is recorded with who made it. Work on isolated branches doesn't reach your main code until you approve it.</p></details>
+  </div></section>
+
+  <footer><div class="wrap">
+    <a class="brand" href="/" style="font-size:15px"><img src="/img/icon.png" alt="" style="width:22px;height:22px">TeamCode</a>
+    <span>Built on Claude Code.</span><span style="margin-left:auto" id="foot-version"></span>
+  </div></footer>
+
+  <script>
+    (async () => {
+      const ua = navigator.userAgent;
+      const isMac = /Mac/i.test(navigator.platform) || /Mac OS X/.test(ua);
+      let arm = true;
+      try { if (navigator.userAgentData?.getHighEntropyValues) arm = (await navigator.userAgentData.getHighEntropyValues(['architecture'])).architecture === 'arm'; } catch {}
+      const mine = isMac ? (arm ? 'mac-arm64' : 'mac-x64') : /Win/i.test(ua) ? 'windows' : null;
+      let info = null;
+      try { info = await (await fetch('/api/release')).json(); } catch {}
+      const ver = document.getElementById('dl-version');
+      if (!info || !info.version) {
+        ver.textContent = 'The first release is on its way. Check back soon.';
+        return;
+      }
+      const date = info.publishedAt ? new Date(info.publishedAt).toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' }) : '';
+      ver.textContent = `Version ${info.version.replace(/^v/, '')}${date ? ` · released ${date}` : ''}`;
+      document.getElementById('foot-version').textContent = `v${info.version.replace(/^v/, '')}`;
+      for (const [k, p] of Object.entries(info.platforms)) {
+        const a = document.querySelector(`[data-dl="${k}"]`);
+        const f = document.querySelector(`[data-file="${k}"]`);
+        if (p) { a.classList.remove('disabled'); f.textContent = `${p.file} · ${p.sizeMb} MB`; }
+        else a.textContent = 'Coming soon';
+      }
+      if (mine && info.platforms[mine]) {
+        const hero = document.getElementById('hero-dl');
+        hero.href = `/download/${mine}`;
+        hero.textContent = `⬇ Download for ${info.platforms[mine].label}`;
+        document.getElementById('hero-meta').innerHTML = `v${info.version.replace(/^v/, '')} · Free · <a href="#download">Other platforms</a>`;
+      }
+    })();
+  </script>
+</body>
+</html>
