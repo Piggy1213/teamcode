@@ -602,7 +602,9 @@ function viewSettings() {
     ${sec('Workspace', 'Shared with everyone on the team.', `
       <label class="field">Test command <span class="hint">Used by Run tests in Review</span><div class="row"><input id="set-test" class="mono" value="${esc(S.state.settings.testCommand || '')}" placeholder="npm test"><button class="btn" data-act="save-test">Save</button></div></label>
       <label class="field">Public server URL <span class="hint">If you expose your TeamCode port with a port-forward or tunnel, invites use this address</span><div class="row"><input id="set-public" value="${esc(s.publicUrl)}" placeholder="https://my-tunnel.example.com"><button class="btn" data-act="save-public">Save</button></div></label>`)}
-    ${sec('Other agents', 'Any MCP client can join this workspace: Claude Code in a terminal, Claude desktop, IDEs.', `<div><button class="btn" data-act="external-agent">${icon('link')}Show connection settings</button></div>`)}
+    ${sec('Claude Code', 'Use TeamCode from your own Claude Code sessions in this folder: see the team, create tasks, and start agents on this computer.', S.project.claudeLinked
+      ? `<div class="small">${icon('check')} Added to Claude Code for <code>${esc(S.project.root)}</code>. Open Claude Code in that folder and ask it about the team.</div><div class="row"><button class="btn" data-act="external-agent">Details</button><button class="btn ghost" data-act="claude-unlink">Remove</button></div>`
+      : `<div class="row"><button class="btn primary" data-act="claude-link">${icon('plus')}Add to Claude Code</button><button class="btn ghost" data-act="external-agent">Set up by hand</button></div>${S.project.role === 'host' ? '<div class="small muted">Works while TeamCode is open on this computer. Host the project on TeamCode cloud to keep it connected when it isn\'t.</div>' : ''}`)}
     ${sec('Git', 'Isolated agent branches and merge review need a git repository.', !g ? '<span class="spinner"></span>' : g.repo ? `<div class="small">On <code>${esc(g.branch || '(no commits)')}</code>, <span class="num">${g.dirty}</span> uncommitted file${g.dirty === 1 ? '' : 's'}</div><div><button class="btn" data-act="checkpoint">Commit working copy (checkpoint)</button></div>` : `<div class="small muted">This folder isn't a git repository.</div><div><button class="btn" data-act="init-git">Initialize git repository</button></div>`)}
     ${sec('Updates', 'TeamCode checks for new versions in the background and installs them when you restart.', updatesSetting())}
     ${sec('Shortcuts', '', `<div class="col small" style="gap:6px"><div class="row"><span class="kbd">${MOD} N</span><span class="muted">New task</span></div><div class="row"><span class="kbd">${MOD} P</span><span class="muted">Plan a feature</span></div><div class="row"><span class="kbd">${MOD} 1 to 7</span><span class="muted">Switch views</span></div><div class="row"><span class="kbd">Esc</span><span class="muted">Close dialogs</span></div></div>`)}
@@ -1010,13 +1012,20 @@ A['save-public'] = async () => { const s = await run(() => api('app:saveSettings
 A['external-agent'] = async () => {
   const c = await run(() => api('project:externalAgentConfig'));
   if (!c) return;
-  modal(`${mhead('Connect another AI agent')}<div class="modal-body">
-    <div class="small">1. Add the TeamCode MCP server to the agent's MCP config (for Claude Code: <code>.mcp.json</code> in the project, or <code>claude mcp add-json teamcode '…'</code>):</div>
-    <pre class="out">${esc(c.mcp)}</pre><div><button class="btn sm" data-act="copy" data-text="${esc(c.mcp)}">Copy MCP config</button></div>
-    <div class="small">2. For Claude Code, also add these hooks to <code>.claude/settings.local.json</code> so edits are version-checked and team updates are delivered automatically:</div>
-    <pre class="out">${esc(c.hooks)}</pre><div><button class="btn sm" data-act="copy" data-text="${esc(c.hooks)}">Copy hooks</button></div>
-    <div class="small muted">Agents without hooks can still coordinate with the record_file_read / record_file_change and get_updates tools.</div></div>`, { wide: true });
+  modal(`${mhead('Use TeamCode from Claude Code', 'terminal')}<div class="modal-body">
+    <div class="small">1. In a terminal, in <code>${esc(c.root)}</code>, run:</div>
+    <pre class="out">${esc(c.command)}</pre><div><button class="btn sm" data-act="copy" data-text="${esc(c.command)}">${icon('copy')}Copy command</button></div>
+    <div class="small">2. Add these hooks to <code>.claude/settings.local.json</code> in that folder, so edits are version-checked and team updates reach Claude Code automatically. TeamCode never syncs that file to teammates.</div>
+    <pre class="out">${esc(c.hooks)}</pre><div><button class="btn sm" data-act="copy" data-text="${esc(c.hooks)}">${icon('copy')}Copy hooks</button></div>
+    <div class="small muted">Other MCP clients can use the same server definition:</div><pre class="out">${esc(c.server)}</pre>
+    ${c.local ? '<div class="small muted">This project is hosted on this computer, so the connection works while TeamCode is open.</div>' : ''}</div>`, { wide: true });
 };
+A['claude-link'] = async (d, el) => {
+  el.disabled = true;
+  if (await run(() => api('claude:link'), 'Added to Claude Code')) { S.project.claudeLinked = true; }
+  render();
+};
+A['claude-unlink'] = async () => { if (await run(() => api('claude:unlink'), 'Removed from Claude Code')) { S.project.claudeLinked = false; render(); } };
 A['init-git'] = async () => { const g = await run(() => api('project:initGit'), 'Git repository initialized'); if (g) { S.gitInfo = g; render(); } };
 A.checkpoint = async () => { const r = await run(() => api('project:checkpoint')); toast(r ? `Committed ${String(r).slice(0, 8)}` : 'Nothing to commit', 'ok'); S.gitInfo = null; render(); };
 

@@ -1,6 +1,7 @@
 'use strict';
 const { app, BrowserWindow, ipcMain, dialog, shell, clipboard, Notification, nativeTheme } = require('electron');
 const fs = require('fs');
+const { execFile } = require('child_process');
 const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
@@ -9,7 +10,7 @@ const https = require('https');
 const { TeamServer } = require('../../server/server');
 const { encodeInvite, decodeInvite } = require('../../server/invite');
 const { ProjectSession } = require('./session');
-const { findClaude, claudeVersion, claudeAuthStatus, loginScript, findNode, isRunnable, isDesktopApp, resolveClaudePath } = require('./claude-cli');
+const { findClaude, claudeVersion, claudeAuthStatus, loginScript, findNode, isRunnable, isDesktopApp, resolveClaudePath, spawnSpec } = require('./claude-cli');
 const git = require('./git');
 const { Updater } = require('./updater');
 const { Account } = require('./account');
@@ -90,7 +91,7 @@ function ping(url) {
 
 // ---------- projects ----------
 function projectView(p) {
-  return p && { root: p.root, name: p.name, role: p.role, workspace: p.workspace, url: p.url, lastOpened: p.lastOpened, shared: !!p.shared };
+  return p && { root: p.root, name: p.name, role: p.role, workspace: p.workspace, url: p.url, lastOpened: p.lastOpened, shared: !!p.shared, cloud: !!p.cloud, claudeLinked: !!p.claudeLinked };
 }
 
 async function openSession(project) {
@@ -105,6 +106,7 @@ async function openSession(project) {
   saveConfig();
   session = new ProjectSession({ project, user: config.user, getSettings, send, dataDir: userData, scripts, notify });
   await session.start();
+  claudeCodeLink(session); // the local server's port can change between runs; keep Claude Code's connection current
   win?.setTitle(`${project.name} | TeamCode`);
   return projectView(project);
 }
@@ -122,6 +124,64 @@ async function claudeInfo(p) {
 
 // Claude Code settings changed: let the open project try starting agents again.
 function claudeChanged() { session?.resumeAuto(); }
+
+// ---------- Claude Code integration ("Add to Claude Code") ----------
+// Claude Code gets an MCP entry and hooks that read their connection from a private file TeamCode keeps
+// current, so the workspace token never lands in the project folder or in Claude Code's own config.
+const HOOK_EVENTS = ['PreToolUse', 'PostToolUse', 'SessionStart', 'UserPromptSubmit', 'Stop'];
+
+function claudeCodeLink(s) {
+  const p = s.project;
+  const node = findNode();
+  const runtime = node || process.execPath;
+  const file = path.join(s.localDir, 'claude-code.json');
+  fs.mkdirSync(s.localDir, { recursive: true });
+  fs.writeFileSync(file, JSON.stringify({
+    TEAMCODE_URL: p.role === 'host' ? `http://127.0.0.1:${serverPort}` : p.url, TEAMCODE_WORKSPACE: p.workspace, TEAMCODE_TOKEN: p.token,
+    TEAMCODE_ROOT: p.root, TEAMCODE_CLIENT: 'Claude Code', TEAMCODE_USER_ID: config.user.id, TEAMCODE_USER_NAME: config.user.name || '',
+    TEAMCODE_AGENT_NAME: `${config.user.name || 'My'}'s Claude Code`,
+    TEAMCODE_AGENT_ID: 'agt_cc_' + crypto.createHash('sha1').update(`${config.user.id}|${p.workspace}|${p.root.toLowerCase()}`).digest('hex').slice(0, 10),
+  }, null, 1), { mode: 0o600 });
+  // Electron only behaves like node with ELECTRON_RUN_AS_NODE; Claude Code runs hook commands in a POSIX shell.
+  const server = { type: 'stdio', command: runtime, args: [scripts.mcp, '--config', file], ...(node ? {} : { env: { ELECTRON_RUN_AS_NODE: '1' } }) };
+  const hookCmd = `${node ? '' : 'ELECTRON_RUN_AS_NODE=1 '}"${runtime}" "${scripts.hook}" --config "${file}"`;
+  return { file, server, hookCmd };
+}
+
+// Adds or removes TeamCode's hooks in <root>/.claude/settings.local.json, keeping everything else in it.
+function writeClaudeHooks(root, hookCmd) {
+  const f = path.join(root, '.claude', 'settings.local.json');
+  let j = {};
+  try { j = JSON.parse(fs.readFileSync(f, 'utf8')); } catch (e) {
+    if (e.code !== 'ENOENT') throw new Error(`.claude/settings.local.json in this project isn't valid JSON. Fix or delete it, then try again.`);
+  }
+  const ours = (h) => /[\\/]agent[\\/]hook\.js" --config /.test(h?.command || '');
+  j.hooks = j.hooks && typeof j.hooks === 'object' ? j.hooks : {};
+  for (const ev of HOOK_EVENTS) {
+    const groups = (j.hooks[ev] || []).map((g) => ({ ...g, hooks: (g.hooks || []).filter((h) => !ours(h)) })).filter((g) => g.hooks.length);
+    if (hookCmd) groups.push({ ...(ev === 'PreToolUse' ? { matcher: 'Edit|Write|MultiEdit|NotebookEdit' } : ev === 'PostToolUse' ? { matcher: '.*' } : {}), hooks: [{ type: 'command', command: hookCmd, timeout: 10 }] });
+    if (groups.length) j.hooks[ev] = groups; else delete j.hooks[ev];
+  }
+  if (!Object.keys(j.hooks).length) delete j.hooks;
+  fs.mkdirSync(path.dirname(f), { recursive: true });
+  fs.writeFileSync(f, JSON.stringify(j, null, 2) + '\n');
+}
+
+// Runs the Claude Code CLI (e.g. `claude mcp add-json ...`) in the project folder.
+function claudeCli(args, cwd) {
+  const cli = config.settings.claudePath;
+  if (!cli || !isRunnable(cli) || isDesktopApp(cli)) throw new Error('Claude Code isn\'t set up. Open Settings, Claude Code, and press Detect.');
+  const spec = spawnSpec(cli, findNode());
+  if (spec.shell) throw new Error('Run the command below in a terminal instead (this Claude Code install needs a shell).');
+  return new Promise((resolve, reject) => {
+    execFile(spec.command, [...spec.prefix, ...args], { cwd, timeout: 30000, windowsHide: true }, (err, stdout, stderr) => {
+      if (err) reject(new Error(String(stderr || stdout || err.message).trim().split('\n').slice(-3).join(' ')));
+      else resolve(String(stdout));
+    });
+  });
+}
+
+const shq = (v) => `'${String(v).replace(/'/g, `'\\''`)}'`;
 
 // ---------- IPC ----------
 const handlers = {
@@ -235,14 +295,31 @@ const handlers = {
   },
   'project:externalAgentConfig': () => {
     const s = requireSession();
-    const p = s.project;
-    const node = findNode();
-    const inviteUrl = p.role === 'host' ? `http://127.0.0.1:${serverPort}` : p.url;
-    const env = { TEAMCODE_INVITE: encodeInvite({ url: inviteUrl, workspace: p.workspace, token: p.token, name: p.name }), TEAMCODE_ROOT: p.root, TEAMCODE_AGENT_NAME: `${config.user.name || 'My'} external agent` };
-    const mcp = { mcpServers: { teamcode: { command: node || process.execPath, args: [scripts.mcp], env: { ...env, ...(node ? {} : { ELECTRON_RUN_AS_NODE: '1' }) } } } };
-    const hookCmd = `"${node || process.execPath}" "${scripts.hook}"`;
-    const hooks = { hooks: { PreToolUse: [{ matcher: 'Edit|Write|MultiEdit|NotebookEdit', hooks: [{ type: 'command', command: hookCmd }] }], PostToolUse: [{ matcher: '.*', hooks: [{ type: 'command', command: hookCmd }] }], SessionStart: [{ hooks: [{ type: 'command', command: hookCmd }] }], UserPromptSubmit: [{ hooks: [{ type: 'command', command: hookCmd }] }] } };
-    return { mcp: JSON.stringify(mcp, null, 2), hooks: JSON.stringify(hooks, null, 2), env };
+    const link = claudeCodeLink(s);
+    const hooks = { hooks: Object.fromEntries(HOOK_EVENTS.map((ev) => [ev, [{ ...(ev === 'PreToolUse' ? { matcher: 'Edit|Write|MultiEdit|NotebookEdit' } : ev === 'PostToolUse' ? { matcher: '.*' } : {}), hooks: [{ type: 'command', command: link.hookCmd, timeout: 10 }] }]])) };
+    return {
+      linked: !!s.project.claudeLinked, root: s.project.root, local: s.project.role === 'host',
+      command: `claude mcp add-json teamcode ${shq(JSON.stringify(link.server))} --scope local`,
+      server: JSON.stringify(link.server, null, 2), hooks: JSON.stringify(hooks, null, 2),
+    };
+  },
+  'claude:link': async () => {
+    const s = requireSession();
+    const link = claudeCodeLink(s);
+    await claudeCli(['mcp', 'remove', 'teamcode', '--scope', 'local'], s.project.root).catch(() => {});
+    await claudeCli(['mcp', 'add-json', 'teamcode', JSON.stringify(link.server), '--scope', 'local'], s.project.root);
+    writeClaudeHooks(s.project.root, link.hookCmd);
+    s.project.claudeLinked = true;
+    saveConfig();
+    return true;
+  },
+  'claude:unlink': async () => {
+    const s = requireSession();
+    await claudeCli(['mcp', 'remove', 'teamcode', '--scope', 'local'], s.project.root).catch(() => {});
+    writeClaudeHooks(s.project.root, null);
+    s.project.claudeLinked = false;
+    saveConfig();
+    return true;
   },
   'project:gitInfo': () => requireSession().gitInfo(),
   'project:initGit': async () => { await git.initRepo(requireSession().project.root); return requireSession().gitInfo(); },

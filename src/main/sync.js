@@ -9,7 +9,8 @@ const { EventEmitter } = require('events');
 const chokidar = require('chokidar');
 const ignore = require('ignore');
 
-const ALWAYS_IGNORE = ['.git/', 'node_modules/', '.teamcode/', '.DS_Store', 'Thumbs.db', '*.swp', '*~', '.~lock.*', 'dist/', 'build/', 'out/', '.next/', '__pycache__/', '.venv/', 'venv/'];
+// .claude/settings.local.json is personal by definition (Claude Code keeps it out of git too): never sync it.
+const ALWAYS_IGNORE = ['.git/', 'node_modules/', '.teamcode/', '.claude/settings.local.json', '.DS_Store', 'Thumbs.db', '*.swp', '*~', '.~lock.*', 'dist/', 'build/', 'out/', '.next/', '__pycache__/', '.venv/', 'venv/'];
 const MAX_BYTES = 5 * 1024 * 1024;
 
 const sha = (buf) => crypto.createHash('sha256').update(buf).digest('hex');

@@ -5,7 +5,9 @@
 // decisions, blockers and interface contracts, and request coordination or review.
 const { loadConfig, agentCall, register, relPath, fileHash } = require('./api');
 
-const cfg = loadConfig();
+// A bad or missing config must not crash before the MCP handshake: report it from every tool instead.
+let cfg = null, cfgError = null;
+try { cfg = loadConfig(); } catch (e) { cfgError = e.message; }
 let registered = null;
 
 const S = (props, required = []) => ({ type: 'object', properties: props, required, additionalProperties: false });
@@ -117,24 +119,40 @@ const TOOLS = [
   {
     name: 'update_task_status',
     description: 'Update your task status: started, completed (with summary), failed (with reason), or blocked.',
-    inputSchema: S({ status: { type: 'string', enum: ['started', 'completed', 'failed', 'blocked'] }, summary: str('Summary or reason') }, ['status']),
+    inputSchema: S({ status: { type: 'string', enum: ['started', 'completed', 'failed', 'blocked'] }, summary: str('Summary or reason'), task_id: str('Task id, if you were not started on a task (see team_status)') }, ['status']),
     run: async (a) => {
-      if (a.status === 'completed') return agentCall(cfg, 'completeTask', { summary: a.summary });
-      if (a.status === 'failed') return agentCall(cfg, 'failTask', { error: a.summary });
+      if (a.status === 'completed') return agentCall(cfg, 'completeTask', { summary: a.summary, taskId: a.task_id });
+      if (a.status === 'failed') return agentCall(cfg, 'failTask', { error: a.summary, taskId: a.task_id });
       if (a.status === 'blocked') return agentCall(cfg, 'reportBlocker', { description: a.summary || 'Blocked' });
       return agentCall(cfg, 'setAgentStatus', { status: 'working', detail: a.summary || 'started' });
     },
   },
   {
     name: 'create_tasks',
-    description: 'Orchestrator tool: add subtasks to the shared board. depends_on may reference other new tasks by title or zero-based index. Only split work that can genuinely proceed in parallel.',
+    description: 'Add tasks to the shared TeamCode board. depends_on may reference other new tasks by title or zero-based index. Only split work that can genuinely proceed in parallel. Set start_on_my_computer to have the TeamCode app on this person\'s computer start a Claude Code agent for each task as soon as it is ready.',
     inputSchema: S({
       tasks: {
         type: 'array',
         items: S({ title: str('Title'), description: str('Spec, acceptance criteria, interfaces'), depends_on: { type: 'array', items: { type: ['string', 'integer'] } }, files: strs('Files it will likely touch'), mode: { type: 'string', enum: ['shared', 'isolated'] } }, ['title']),
       },
+      start_on_my_computer: { type: 'boolean', description: 'Start an agent for each task automatically on this person\'s computer (needs the TeamCode app open)' },
     }, ['tasks']),
-    run: (a) => agentCall(cfg, 'createTasks', { tasks: (a.tasks || []).map((t) => ({ ...t, dependsOn: t.depends_on })) }),
+    run: (a) => {
+      if (a.start_on_my_computer && !cfg.userId) throw new Error('This connection is not linked to a TeamCode user. Add it from the TeamCode app (Settings, Claude Code) to start tasks on your computer.');
+      const runOn = a.start_on_my_computer ? { runner: cfg.userId, runnerName: cfg.userName || cfg.name, autoStart: true } : {};
+      return agentCall(cfg, 'createTasks', { tasks: (a.tasks || []).map((t) => ({ ...t, dependsOn: t.depends_on, ...runOn })) });
+    },
+  },
+  {
+    name: 'start_task',
+    description: 'Have the TeamCode app on this person\'s computer start a Claude Code agent for a task (now if it is ready, otherwise as soon as its dependencies are done). Restarts failed or finished tasks.',
+    inputSchema: S({ task_id: str('Task id from team_status') }, ['task_id']),
+    run: async (a) => {
+      if (!cfg.userId) throw new Error('This connection is not linked to a TeamCode user. Add it from the TeamCode app (Settings, Claude Code) to start tasks on your computer.');
+      const t = await agentCall(cfg, 'updateTask', { taskId: a.task_id, runner: cfg.userId, runnerName: cfg.userName || cfg.name, autoStart: true });
+      if (['failed', 'done', 'cancelled'].includes(t.status)) await agentCall(cfg, 'reopenTask', { taskId: a.task_id });
+      return `"${t.title}" will start on ${cfg.userName || 'your'} computer${t.status === 'waiting' ? ' when its dependencies are done' : ' in a moment'}. The TeamCode app needs to be open.`;
+    },
   },
   {
     name: 'record_file_read',
@@ -168,6 +186,7 @@ async function handle(msg) {
   if (method === 'tools/call') {
     const tool = TOOLS.find((t) => t.name === params?.name);
     if (!tool) return send({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: `Unknown tool ${params?.name}` }], isError: true } });
+    if (cfgError) return send({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: `TeamCode isn't connected: ${cfgError}` }], isError: true } });
     try {
       if (!registered) registered = await register(cfg);
       const result = await tool.run(params.arguments || {});
@@ -201,5 +220,7 @@ process.stdin.on('data', (chunk) => {
 process.stdin.on('end', () => process.exit(0));
 
 // Register immediately and keep a heartbeat so the workspace can tell live agents from stale ones.
-register(cfg).then((r) => { registered = r; }).catch(() => {});
-setInterval(() => { agentCall(cfg, 'heartbeat', {}).catch(() => {}); }, 30000).unref();
+if (cfg) {
+  register(cfg).then((r) => { registered = r; }).catch(() => {});
+  setInterval(() => { agentCall(cfg, 'heartbeat', {}).catch(() => {}); }, 30000).unref();
+}

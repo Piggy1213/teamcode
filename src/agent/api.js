@@ -2,7 +2,9 @@
 // Shared helpers for agent-side processes (MCP server and Claude Code hooks).
 // Configuration comes from environment variables so any MCP client can be pointed at a workspace:
 //   TEAMCODE_INVITE (or TEAMCODE_URL + TEAMCODE_WORKSPACE + TEAMCODE_TOKEN), TEAMCODE_AGENT_ID, TEAMCODE_AGENT_NAME,
-//   TEAMCODE_ROOT, TEAMCODE_BRANCH, TEAMCODE_TASK_ID, TEAMCODE_CLIENT, TEAMCODE_USER_ID, TEAMCODE_MODE
+//   TEAMCODE_ROOT, TEAMCODE_BRANCH, TEAMCODE_TASK_ID, TEAMCODE_CLIENT, TEAMCODE_USER_ID, TEAMCODE_USER_NAME, TEAMCODE_MODE
+// or from `--config <file>`: a JSON file of those same keys that the TeamCode app writes and keeps current
+// (used by "Add to Claude Code", so the workspace token never sits in Claude Code's own settings).
 const http = require('http');
 const https = require('https');
 const fs = require('fs');
@@ -11,7 +13,20 @@ const path = require('path');
 const crypto = require('crypto');
 const { decodeInvite } = require('../../server/invite');
 
-function loadConfig(env = process.env) {
+// True when this process runs inside an agent the TeamCode app launched (it sets these on the agent).
+const isAgentEnv = (env) => !!(env.TEAMCODE_AGENT_ID && env.TEAMCODE_URL && env.TEAMCODE_WORKSPACE && env.TEAMCODE_TOKEN);
+
+function loadConfig(env = process.env, argv = process.argv) {
+  const i = argv.indexOf('--config');
+  const file = i >= 0 ? argv[i + 1] : null;
+  // A personal "Add to Claude Code" entry can also load inside an agent TeamCode launched. That agent's own
+  // identity wins, so it never shows up twice.
+  const insideAgent = !!file && isAgentEnv(env);
+  if (file && !insideAgent) {
+    let fromFile;
+    try { fromFile = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) { throw new Error(`Can't read the TeamCode connection file ${file} (${e.code || e.message}). Open the project in the TeamCode app, then try again.`); }
+    env = { ...env, ...fromFile };
+  }
   let base = {};
   if (env.TEAMCODE_INVITE) base = decodeInvite(env.TEAMCODE_INVITE);
   const url = (env.TEAMCODE_URL || base.url || '').replace(/\/+$/, '');
@@ -25,7 +40,8 @@ function loadConfig(env = process.env) {
   return {
     url, workspace, token, root, name, agentId,
     branch: env.TEAMCODE_BRANCH || 'main', taskId: env.TEAMCODE_TASK_ID || null,
-    client: env.TEAMCODE_CLIENT || 'Claude Code', userId: env.TEAMCODE_USER_ID || null, mode: env.TEAMCODE_MODE || 'shared',
+    client: env.TEAMCODE_CLIENT || 'Claude Code', userId: env.TEAMCODE_USER_ID || null, userName: env.TEAMCODE_USER_NAME || null,
+    mode: env.TEAMCODE_MODE || 'shared', external: !!file && !insideAgent, insideAgent,
   };
 }
 

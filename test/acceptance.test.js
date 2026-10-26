@@ -496,3 +496,73 @@ test('a Claude Code that crashes on launch fails the task once instead of restar
   await session.stop();
 });
 
+// ---------- "Add to Claude Code": MCP server from a config file ----------
+function mcpSession(args, env) {
+  const p = spawn(process.execPath, [MCP, ...args], { env: { PATH: process.env.PATH, ...env }, stdio: ['pipe', 'pipe', 'pipe'] });
+  let buf = '', next = 1;
+  const waiting = new Map();
+  p.stdout.on('data', (d) => {
+    buf += d;
+    let i;
+    while ((i = buf.indexOf('\n')) >= 0) { const line = buf.slice(0, i); buf = buf.slice(i + 1); if (!line.trim()) continue; const m = JSON.parse(line); waiting.get(m.id)?.(m); }
+  });
+  const rpc = (method, params) => new Promise((resolve) => { const id = next++; waiting.set(id, resolve); p.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n'); });
+  const tool = async (name, args) => { const r = await rpc('tools/call', { name, arguments: args }); return { error: !!r.result.isError, text: r.result.content[0].text }; };
+  return { rpc, tool, close: () => p.kill() };
+}
+
+test('Claude Code connection file: the MCP server can plan and start tasks on the person\'s computer', async () => {
+  const W = server.coordinator.ensureWorkspace('accept-cc-ws', { name: 'CC' });
+  const root = tmp('ccroot');
+  const file = path.join(tmp('ccconf'), 'claude-code.json');
+  fs.writeFileSync(file, JSON.stringify({ TEAMCODE_URL: url, TEAMCODE_WORKSPACE: W.id, TEAMCODE_TOKEN: W.token, TEAMCODE_ROOT: root, TEAMCODE_USER_ID: 'usr_cc', TEAMCODE_USER_NAME: 'Casey', TEAMCODE_AGENT_NAME: "Casey's Claude Code", TEAMCODE_AGENT_ID: 'agt_cc_test' }));
+  const mcp = mcpSession(['--config', file], {});
+  const init = await mcp.rpc('initialize', { protocolVersion: '2025-06-18' });
+  assert.equal(init.result.serverInfo.name, 'teamcode');
+  const names = (await mcp.rpc('tools/list', {})).result.tools.map((t) => t.name);
+  assert.ok(names.includes('start_task') && names.includes('create_tasks'));
+
+  const made = await mcp.tool('create_tasks', { tasks: [{ title: 'Add export button' }, { title: 'Docs for export', depends_on: [0] }], start_on_my_computer: true });
+  assert.equal(made.error, false, made.text);
+  const created = Object.values(W.state.tasks);
+  assert.equal(created.length, 2);
+  assert.ok(created.every((t) => t.runner === 'usr_cc' && t.autoStart === true), 'tasks are set to start on Casey\'s computer');
+  assert.ok(W.state.agents.agt_cc_test, 'registered under the fixed Claude Code identity');
+
+  const docs = created.find((t) => t.title === 'Docs for export');
+  await W.call('updateTask', { taskId: docs.id, autoStart: false, runner: null });
+  const started = await mcp.tool('start_task', { task_id: docs.id });
+  assert.match(started.text, /will start on Casey/);
+  assert.equal(W.state.tasks[docs.id].autoStart, true);
+
+  const exportTask = created.find((t) => t.title === 'Add export button');
+  const done = await mcp.tool('update_task_status', { status: 'completed', summary: 'Shipped', task_id: exportTask.id });
+  assert.equal(done.error, false, done.text);
+  assert.equal(W.state.tasks[exportTask.id].status, 'done');
+  mcp.close();
+
+  // A missing connection file is reported from the tools instead of crashing the server.
+  const broken = mcpSession(['--config', path.join(root, 'nope.json')], {});
+  assert.equal((await broken.rpc('initialize', {})).result.serverInfo.name, 'teamcode');
+  const r = await broken.tool('team_status', {});
+  assert.equal(r.error, true);
+  assert.match(r.text, /isn't connected/);
+  broken.close();
+});
+
+test('personal Claude Code hooks stand down inside an agent TeamCode launched', async () => {
+  const W = server.coordinator.ensureWorkspace('accept-cc2-ws', { name: 'CC2' });
+  const file = path.join(tmp('ccconf2'), 'claude-code.json');
+  fs.writeFileSync(file, JSON.stringify({ TEAMCODE_URL: url, TEAMCODE_WORKSPACE: W.id, TEAMCODE_TOKEN: W.token, TEAMCODE_AGENT_ID: 'agt_cc_personal' }));
+  const internalEnv = { TEAMCODE_URL: url, TEAMCODE_WORKSPACE: W.id, TEAMCODE_TOKEN: W.token, TEAMCODE_AGENT_ID: 'agt_internal' };
+  const out = await new Promise((resolve) => {
+    const p = spawn(process.execPath, [HOOK, '--config', file], { env: { PATH: process.env.PATH, ...internalEnv } });
+    let o = ''; p.stdout.on('data', (d) => { o += d; });
+    p.on('close', () => resolve(o));
+    p.stdin.end(JSON.stringify({ hook_event_name: 'SessionStart', cwd: os.tmpdir() }));
+  });
+  assert.equal(out, '', 'no briefing from the personal hook');
+  assert.equal(W.state.agents.agt_cc_personal, undefined, 'the personal identity never registered');
+  assert.equal(W.state.agents.agt_internal, undefined, 'and the hook did not act for the agent either');
+});
+

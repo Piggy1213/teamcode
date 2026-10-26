@@ -29,6 +29,8 @@ function out(obj) {
 async function main() {
   const input = JSON.parse((await readStdin()) || '{}');
   const cfg = loadConfig();
+  // Personal hooks (from "Add to Claude Code") inside an agent TeamCode launched: its own hooks already run.
+  if (cfg.insideAgent) return;
   if (!process.env.TEAMCODE_ROOT && input.cwd) cfg.root = input.cwd;
   const event = input.hook_event_name;
   const tool = input.tool_name;
