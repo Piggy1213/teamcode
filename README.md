@@ -229,3 +229,10 @@ scripts/       smoke test, icon generator
 - **Website** (`website/`) is a zero-dependency Node server for Railway. It shows the landing page and serves the latest release's installers from this private repo via `/download/windows`, `/download/mac-arm64`, `/download/mac-x64` (redirects to short-lived signed GitHub URLs).
   Railway variables: `GITHUB_REPO=lbakes111/teamcode`, `GITHUB_TOKEN=<fine-grained token with read-only Contents access to this repo>`.
 - Installers are not code-signed yet: Windows shows a SmartScreen prompt and macOS needs `xattr -cr /Applications/TeamCode.app` (the site explains both). Signing needs a Windows code-signing certificate and an Apple Developer ID.
+
+### Railway services (summary)
+
+| Service | Root dir | Start | Variables |
+| --- | --- | --- | --- |
+| Website | `website/` | `node server.js` (`website/railway.json`) | `GITHUB_REPO=lbakes111/teamcode`, `GITHUB_TOKEN` (fine-grained, Contents read-only, created by the repo owner) |
+| Team workspace server (optional, for remote teams) | repo root | build `npm ci --omit=dev`, start `node server/standalone.js` | `TEAMCODE_WORKSPACE`, `TEAMCODE_NAME`, `TEAMCODE_TOKEN` (random secret), `TEAMCODE_DATA=/data` + a volume at `/data`. The invite code is printed in the deploy logs. |
