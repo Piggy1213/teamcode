@@ -38,6 +38,15 @@ const POISON = new Set(['__proto__', 'constructor', 'prototype']);
 // Operations that add records to a workspace. On a hosted server they stop once the project's records
 // (state + event log) use a quarter of its storage; everything else, including finishing work, keeps working.
 const GROWTH_OPS = new Set(['createTask', 'createTasks', 'chat', 'publishUpdate', 'recordDecision', 'publishContract', 'requestCoordination', 'reportBlocker']);
+// Still allowed when a hosted project is completely full: reading, finishing and reviewing work, cleanup.
+const WHEN_FULL = new Set(['snapshot', 'fileIndex', 'fileGet', 'fileHistory', 'events', 'getContext', 'teamStatus', 'getAgent', 'getUpdates', 'pullDigest',
+  'heartbeat', 'checkFiles', 'findOverlaps', 'getContract', 'taskChanges', 'conflictData', 'userJoined', 'userLeft', 'preEdit', 'agentRead',
+  'agentExited', 'releaseFiles', 'setAgentStatus', 'completeTask', 'failTask', 'cancelTask', 'deleteTask', 'reviewDecision', 'markMerged', 'markReverted',
+  'resolveConflictRecord', 'testCompleted']);
+const MAX_STRING = 64 * 1024; // any single text field, other than file or contract content
+const MAX_LIST = 2000; // any single list
+const FREE_TEXT_OK = new Set(['contentB64', 'content']);
+const PRUNE_AFTER = 7 * 24 * 3600 * 1000; // finished agents and resolved conflicts are forgotten after a week
 
 const rid = (p) => `${p}_${crypto.randomBytes(5).toString('hex')}`;
 const sha = (buf) => crypto.createHash('sha256').update(buf).digest('hex');
@@ -50,6 +59,14 @@ const arr = (v) => (Array.isArray(v) ? v : v == null || v === '' ? [] : [v]);
 // (or an array that stringifies to one) is just an ordinary key: nothing can reach Object.prototype.
 const dict = (o) => { const d = Object.create(null); if (o) for (const k of Object.keys(o)) d[k] = o[k]; return d; };
 const DICT_KEYS = ['users', 'agents', 'tasks', 'files', 'reservations', 'contracts', 'blockers', 'conflicts', 'settings'];
+// No single text field or list may be huge (file and contract content are bounded by their own limits).
+function oversized(v, key = '', depth = 0) {
+  if (typeof v === 'string') return v.length > MAX_STRING && !FREE_TEXT_OK.has(key);
+  if (!v || typeof v !== 'object' || depth > 8) return false;
+  if (Array.isArray(v)) return v.length > MAX_LIST || v.some((x) => oversized(x, key, depth + 1));
+  return Object.keys(v).some((k) => oversized(v[k], k, depth + 1));
+}
+
 // Defense in depth for merges: request objects may not carry prototype-reaching keys, and absurd nesting
 // is refused outright (no TeamCode request nests more than a few levels).
 function poisoned(v, depth = 0) {
@@ -117,6 +134,7 @@ class Workspace extends EventEmitter {
       if (last && last.seq > this.state.seq) this.state.seq = last.seq;
     }
     for (const [seq, ids] of Object.entries(this.state.delivered || {})) this.delivered.set(Number(seq), new Set(ids));
+    this._migrateChanges();
     for (const f of Object.values(this.state.files)) for (const h of f.history || []) this._ref(h.hash, 1);
     for (const c of Object.values(this.state.conflicts)) if (!c.released) this._ref(c.incomingHash, 1);
     for (const n of ['state.json', 'events.jsonl']) { try { this.metaBytes += fs.statSync(path.join(this.dataDir, n)).size; } catch { /* not written yet */ } }
@@ -132,6 +150,41 @@ class Workspace extends EventEmitter {
       t.contractsUsed = dict(t.contractsUsed);
       if (t.changes) { t.changes = dict(t.changes); t.changeActors = dict(t.changeActors); }
     }
+  }
+
+  // Tasks from before change records existed: build their record from the event log, once, at load.
+  _migrateChanges() {
+    for (const t of Object.values(this.state.tasks)) {
+      if (t.changes) continue;
+      const out = dict(), actors = dict();
+      for (const e of this.events) {
+        if (e.task !== t.id || !['file.changed', 'file.deleted'].includes(e.type)) continue;
+        for (const p of e.files) {
+          if (!out[p]) {
+            const before = this.state.files[p]?.history.filter((h) => h.at < e.ts).slice(-1)[0] || null;
+            out[p] = { beforeVersion: before ? before.version : 0, by: e.actor.name, branch: e.branch };
+          }
+          out[p].lastBy = e.actor.name;
+        }
+        actors[e.actor.id] = true;
+      }
+      if (Object.keys(out).length) { t.changes = out; t.changeActors = actors; }
+    }
+  }
+
+  // Agents long finished and conflicts long resolved are dropped, so a long-lived workspace doesn't grow forever.
+  _prune(now) {
+    if (now - (this._prunedAt || 0) < 3600 * 1000) return;
+    this._prunedAt = now;
+    const holding = new Set(Object.values(this.state.tasks).filter((t) => t.assignee).map((t) => t.assignee));
+    let changed = false;
+    for (const a of Object.values(this.state.agents)) {
+      if (!ACTIVE.has(a.status) && a.status !== 'stale' && now - (a.lastSeen || 0) > PRUNE_AFTER && !holding.has(a.id)) { delete this.state.agents[a.id]; changed = true; }
+    }
+    for (const c of Object.values(this.state.conflicts)) {
+      if (c.status === 'resolved' && now - (c.resolvedAt || c.at || 0) > PRUNE_AFTER) { this._releaseConflict(c); delete this.state.conflicts[c.id]; changed = true; }
+    }
+    if (changed) this._saveSoon();
   }
 
   _ref(hash, delta) {
@@ -297,8 +350,11 @@ class Workspace extends EventEmitter {
     t.changeActors ||= dict();
     for (const p of e.files) {
       if (!t.changes[p]) {
-        const before = this.state.files[p]?.history.filter((h) => h.at < e.ts).slice(-1)[0] || null;
-        t.changes[p] = { beforeVersion: before ? before.version : 0, by: e.actor.name, branch: e.branch };
+        // By version, not time: if the event names the version this change produced (sync got there first),
+        // the version before the task is the one before that; otherwise it is the file's current version.
+        const f = this.state.files[p];
+        const before = e.version ? (f?.history.filter((h) => h.version < e.version).slice(-1)[0]?.version ?? e.version - 1) : (f?.version || 0);
+        t.changes[p] = { beforeVersion: before, by: e.actor.name, branch: e.branch };
       }
       t.changes[p].lastBy = e.actor.name;
     }
@@ -371,6 +427,11 @@ class Workspace extends EventEmitter {
     if (typeof fn !== 'function') throw new CoordError(`Unknown operation: ${op}`, 'unknown_op');
     if (poisoned(args) || poisoned(ctx.user)) throw new CoordError('Invalid request', 'invalid');
     if (!CONTENT_OPS.has(op) && JSON.stringify(args || {}).length > MAX_ARGS_BYTES) throw new CoordError('Request too large', 'too_large');
+    if (oversized(args)) throw new CoordError('Request too large', 'too_large');
+    // A full hosted project can still finish, review and clean up its work, but nothing grows it further.
+    if (this.limits.maxBytes && this._usedBytes() > this.limits.maxBytes && !WHEN_FULL.has(op) && !(op === 'filePut' && args.deleted)) {
+      throw new CoordError(`This project has reached its storage limit (${fmtBytes(this.limits.maxBytes)}) on this server. Finish or delete tasks, or delete the project and start a new one.`, 'too_large');
+    }
     if (this.limits.maxBytes && GROWTH_OPS.has(op) && this.metaBytes > this.limits.maxBytes / 4) {
       throw new CoordError(`This project has reached its storage limit (${fmtBytes(this.limits.maxBytes)}) for tasks and history on this server. Delete finished tasks or old files to make room.`, 'too_large');
     }
@@ -423,6 +484,8 @@ class Workspace extends EventEmitter {
       Object.assign(a, { client: client || a.client, cwd: cwd || a.cwd, lastSeen: Date.now() });
       // A reconnecting agent whose task has moved on to another live agent rejoins without it.
       if (taskId && taskId !== a.taskId) { try { this._assign(a, taskId); } catch (e) { if (e.code !== 'busy') throw e; } }
+      const held = a.taskId && this.state.tasks[a.taskId];
+      if (held && held.assignee && held.assignee !== a.id) a.taskId = null;
       if (wasInactive) this._setAgentStatus(a, 'working', 'reconnected');
       const missed = this._relevantSince(a, a.cursor);
       return { agent: this._agentView(a), reconnected: true, missedCount: missed.length, missed: this._digestText(missed) };
@@ -444,7 +507,15 @@ class Workspace extends EventEmitter {
   _liveOwner(t) {
     if (!t || !['running', 'blocked'].includes(t.status) || !t.assignee) return null;
     const a = this.state.agents[t.assignee];
-    return a && ACTIVE.has(a.status) && a.taskId === t.id ? a : null;
+    // A 'stale' agent (no heartbeat for 90s, e.g. a sleeping laptop) still owns its task until the sweep
+    // marks it offline and returns the task to the queue.
+    return a && (ACTIVE.has(a.status) || a.status === 'stale') && a.taskId === t.id ? a : null;
+  }
+
+  // completeTask / failTask / reportBlocker / requestReview from an agent that no longer has the task.
+  _mustOwn(t, agentId) {
+    const owner = this._liveOwner(t);
+    if (agentId && owner && owner.id !== agentId) throw new CoordError(`${owner.name} has this task now.`, 'busy');
   }
 
   _assign(a, taskId) {
@@ -452,6 +523,9 @@ class Workspace extends EventEmitter {
     if (!t) throw new CoordError(`Unknown task ${taskId}`);
     const owner = this._liveOwner(t);
     if (owner && owner.id !== a.id) throw new CoordError(`${owner.name} is working on this task.`, 'busy');
+    // The previous assignee no longer has this task (so a woken agent can't act on it).
+    const prev = t.assignee && t.assignee !== a.id && this.state.agents[t.assignee];
+    if (prev && prev.taskId === t.id) prev.taskId = null;
     a.taskId = taskId;
     if (t.assignee !== a.id) {
       t.assignee = a.id; t.assigneeName = a.name; t.updatedAt = Date.now();
@@ -663,6 +737,7 @@ class Workspace extends EventEmitter {
     const actor = this._actor({ agentId }, ctx);
     taskId = taskId || actor.agent?.taskId;
     const t = this._task(taskId);
+    this._mustOwn(t, agentId);
     if (t.status === 'done') return t;
     Object.assign(t, { status: 'done', completedAt: Date.now(), updatedAt: Date.now(), summary: String(summary || t.summary || '') });
     this.emitEvent('task.completed', actor, { task: t.id, branch: t.branch, data: { summary: t.summary } });
@@ -674,6 +749,7 @@ class Workspace extends EventEmitter {
   op_failTask({ taskId, agentId, error }, ctx) {
     const actor = this._actor({ agentId }, ctx);
     const t = this._task(taskId || actor.agent?.taskId);
+    this._mustOwn(t, agentId);
     Object.assign(t, { status: 'failed', updatedAt: Date.now(), error: String(error || 'unknown error') });
     this.emitEvent('task.failed', actor, { task: t.id, data: { error: t.error } });
     return t;
@@ -735,6 +811,7 @@ class Workspace extends EventEmitter {
     const actor = this._actor({ agentId }, ctx);
     if (!description) throw new CoordError('description is required');
     const tid = taskId || actor.agent?.taskId || null;
+    if (tid && this.state.tasks[tid]) this._mustOwn(this.state.tasks[tid], agentId);
     const b = { id: rid('blk'), description, taskId: tid, needs: needs || '', blockingTask: blockingTask || null, status: 'open', by: { id: actor.id, name: actor.name }, at: Date.now() };
     this.state.blockers[b.id] = b;
     this.emitEvent('blocker.reported', actor, { task: tid, data: { id: b.id, description, needs: b.needs, blockingTask: b.blockingTask } });
@@ -1100,6 +1177,7 @@ class Workspace extends EventEmitter {
   op_requestReview({ agentId, taskId, summary, files, headCommit, stats }, ctx) {
     const actor = this._actor({ agentId }, ctx);
     const t = this._task(taskId || actor.agent?.taskId);
+    this._mustOwn(t, agentId);
     const changed = arr(files).length ? arr(files).map(normPath) : this._taskChangedFiles(t);
     t.review = { state: 'pending', requestedBy: actor.name, at: Date.now(), summary: summary || t.summary || '', files: changed, stats: stats || null };
     if (headCommit) t.headCommit = headCommit;
@@ -1107,6 +1185,7 @@ class Workspace extends EventEmitter {
   }
 
   _taskChangedFiles(t) {
+    if (t.changes) return Object.keys(t.changes);
     const files = new Set();
     for (const e of this.events) if (e.task === t.id && (e.type === 'file.changed' || e.type === 'file.deleted')) e.files.forEach((f) => files.add(f));
     return [...files];
@@ -1211,8 +1290,7 @@ class Workspace extends EventEmitter {
   op_resolveConflictRecord({ conflictId, resolution }, ctx) {
     const c = this.state.conflicts[conflictId];
     if (!c) throw new CoordError('Unknown conflict');
-    c.status = 'resolved'; c.resolution = resolution || 'acknowledged';
-    this._releaseConflict(c);
+    c.status = 'resolved'; c.resolution = resolution || 'acknowledged'; c.resolvedAt = Date.now();
     this.emitEvent('conflict.resolved', this._actor({}, ctx), { task: c.taskId, files: [c.path], data: { id: c.id, resolution: c.resolution } });
     return c;
   }
@@ -1241,11 +1319,6 @@ class Workspace extends EventEmitter {
     Object.assign(f, { hash, deleted: !!deleted, size: deleted ? 0 : buf.length, binary: deleted ? false : isBinary(buf), by: { kind: actor.kind, id: actor.id, name: actor.name }, at: Date.now() });
     f.history.push({ version: f.version, hash, deleted: !!deleted, by: f.by, at: f.at });
     this._ref(hash, 1);
-    // On a hosted project that is nearly full, deleting a file also frees its earlier versions.
-    if (deleted && this.limits.maxBytes && this._usedBytes() > this.limits.maxBytes * 0.9) {
-      for (const old of f.history.slice(0, -1)) this._ref(old.hash, -1);
-      f.history = f.history.slice(-1);
-    }
     if (f.history.length > MAX_HISTORY) {
       for (const old of f.history.slice(0, f.history.length - MAX_HISTORY)) this._ref(old.hash, -1);
       f.history = f.history.slice(-MAX_HISTORY);
@@ -1325,6 +1398,7 @@ class Workspace extends EventEmitter {
   op_resolveConflict({ conflictId, resolution, contentB64 }, ctx) {
     const c = this.state.conflicts[conflictId];
     if (!c || c.kind !== 'sync') throw new CoordError('Unknown sync conflict');
+    if (c.status === 'resolved' && c.released) throw new CoordError('This conflict was already resolved');
     const actor = this._actor({}, ctx);
     let buf = null, deleted = false;
     if (resolution === 'incoming') { deleted = c.incomingDeleted; buf = deleted ? null : this._getBlob(c.incomingHash); }
@@ -1340,7 +1414,7 @@ class Workspace extends EventEmitter {
       const f = this.state.files[c.path];
       this.emit('file', { path: c.path, version: f.version, hash: f.hash, deleted: !!f.deleted, contentB64: f.deleted ? null : this._getBlob(f.hash).toString('base64'), by: f.by, origin: null });
     }
-    c.status = 'resolved'; c.resolution = resolution;
+    c.status = 'resolved'; c.resolution = resolution; c.resolvedAt = Date.now();
     this._releaseConflict(c);
     this.emitEvent('conflict.resolved', actor, { files: [c.path], data: { id: c.id, resolution } });
     return c;
@@ -1388,6 +1462,7 @@ class Workspace extends EventEmitter {
   // ---------- liveness ----------
   sweep() {
     const now = Date.now();
+    this._prune(now);
     for (const a of Object.values(this.state.agents)) {
       if (ACTIVE.has(a.status) && now - a.lastSeen > STALE_MS) this._setAgentStatus(a, 'stale', 'no heartbeat for 90s');
       else if (a.status === 'stale' && now - a.lastSeen > OFFLINE_MS) {

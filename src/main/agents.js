@@ -392,6 +392,7 @@ class AgentManager extends EventEmitter {
     if ([...this.running.entries()].some(([id, r]) => id !== agentId && r.taskId === m.taskId && !r.exited)) throw new Error('Another agent is running this task now.');
     const task = (await this.conn.call('snapshot').catch(() => null))?.tasks?.[m.taskId] || this.getState()?.tasks?.[m.taskId];
     if (task?.status === 'done' && task.integration?.state === 'merged') throw new Error('This task was merged. Reopen it from the board to keep working on it.');
+    if (task && ['running', 'blocked'].includes(task.status) && task.assignee && task.assignee !== agentId) throw new Error(`${task.assigneeName || 'Another agent'} is working on this task now.`);
     await this.conn.call('registerAgent', { agentId, name: m.name, client: 'Claude Code', taskId: m.taskId, userId: this.user.id, mode: m.mode, branch: m.branch, cwd: m.cwd });
     if (task && task.status !== 'running') await this.conn.call('startTask', { taskId: m.taskId, agentId, branch: m.branch, worktree: m.worktree, baseCommit: m.baseCommit, force: true });
     this.log(agentId, 'user', text);
@@ -478,14 +479,19 @@ class AgentManager extends EventEmitter {
     try {
       const task = (await this.conn.call('snapshot').catch(() => null))?.tasks?.[m.taskId] || this.getState()?.tasks?.[m.taskId];
       const summary = clip(task?.summary || 'Finished in Claude Code', 1200);
-      if (task && !['done', 'cancelled'].includes(task.status)) await this.conn.call('completeTask', { agentId, taskId: m.taskId, summary });
-      await this._requestReview(agentId, m, task, summary);
+      if (task?.assignee && task.assignee !== agentId) {
+        // The task moved to another agent meanwhile: end this handoff without touching that agent's work.
+        this.log(agentId, 'system', `${task.assigneeName || 'Another agent'} has this task now, so nothing was sent for review.`);
+      } else {
+        if (task && !['done', 'cancelled'].includes(task.status)) await this.conn.call('completeTask', { agentId, taskId: m.taskId, summary });
+        await this._requestReview(agentId, m, task, summary);
+        this.log(agentId, 'system', 'Finished in Claude Code. Changes sent for review.');
+      }
       await this.conn.call('agentExited', { agentId, outcome: 'done' }).catch(() => {});
       m.handedOff = false;
       m.finishedAt = Date.now();
       this._saveMeta();
       this._stopKeepAlive(agentId);
-      this.log(agentId, 'system', 'Finished in Claude Code. Changes sent for review.');
     } finally {
       this.emit('runtime');
     }

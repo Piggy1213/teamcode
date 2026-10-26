@@ -262,8 +262,10 @@ class ProjectSession {
     const skipped = [];
     for (const c of changes) {
       if (c.changedByOthersSince.length) { skipped.push({ path: c.path, reason: `also changed by ${[...new Set(c.changedByOthersSince)].join(', ')}` }); continue; }
-      if (c.beforeVersion) await this.call('fileRevert', { path: c.path, version: c.beforeVersion });
-      else fs.rmSync(path.join(this.project.root, c.path), { force: true }); // file was created by the task; the watcher syncs the delete
+      try {
+        if (c.beforeVersion) await this.call('fileRevert', { path: c.path, version: c.beforeVersion });
+        else fs.rmSync(path.join(this.project.root, c.path), { force: true }); // file was created by the task; the watcher syncs the delete
+      } catch (e) { skipped.push({ path: c.path, reason: e.message }); } // keep going: one missing version mustn't stop the rest
     }
     await this.call('markReverted', { taskId });
     return { ok: true, skipped };

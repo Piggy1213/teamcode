@@ -54,7 +54,8 @@ test('state survives a save and reload with prototype-free maps', () => {
 test('settings accept only known keys and the event carries only the change', () => {
   const c = new Coordinator({ dataDir: tmp() });
   const W = c.ensureWorkspace('settings-ws', { name: 'S' });
-  W.call('updateSettings', { settings: { testCommand: 'npm test', junk: 'x'.repeat(400000) } }, user);
+  W.call('updateSettings', { settings: { testCommand: 'npm test', junk: 'x'.repeat(1000) } }, user);
+  assert.throws(() => W.call('updateSettings', { settings: { junk: 'x'.repeat(400000) } }, user), /too large/);
   assert.equal(W.state.settings.junk, undefined);
   const ev = W.events.at(-1);
   assert.deepEqual(ev.data.settings, { testCommand: 'npm test' });
@@ -155,5 +156,88 @@ test('a merged task is not silently restarted; Revert still knows its changes af
   W.call('reopenTask', { taskId: t.id }, user);
   W.call('registerAgent', { agentId: 'agt_m2', name: 'M2' }, user);
   assert.equal(W.call('startTask', { taskId: t.id, agentId: 'agt_m2' }, user).status, 'running', 'after Reopen it can start again');
+  c.close();
+});
+
+test('a full hosted project refuses growth but can still finish, review and clean up', () => {
+  const c = new Coordinator({ dataDir: tmp(), limits: { maxBytes: 300 * 1024 } });
+  const W = c.ensureWorkspace('full-ws', { name: 'F' });
+  const t = W.call('createTask', { title: 'Finish me' }, user);
+  W.call('registerAgent', { agentId: 'agt_f', name: 'F', taskId: t.id }, user);
+  W.call('startTask', { taskId: t.id, agentId: 'agt_f' }, user);
+  let refused = null;
+  for (let i = 0; i < 60 && !refused; i++) {
+    try { W.call('integrationChecked', { taskId: t.id, conflicts: [], risks: [{ kind: 'x', message: 'y'.repeat(30000) }] }, user); W.saveNow(); } catch (e) { refused = e; }
+  }
+  assert.match(refused.message, /storage limit/, 'record growth stops at the cap');
+  assert.throws(() => W.call('registerAgent', { agentId: 'agt_n', name: 'n'.repeat(70000) }, user), /too large/);
+  assert.equal(W.call('completeTask', { agentId: 'agt_f', summary: 'ok' }, user).status, 'done', 'finishing still works');
+  W.call('reviewDecision', { taskId: t.id, decision: 'approve' }, user);
+  W.call('deleteTask', { taskId: t.id }, user);
+  c.close();
+});
+
+test('deleting a file keeps its history, so Revert can restore it', () => {
+  const c = new Coordinator({ dataDir: tmp(), limits: { maxBytes: 1024 * 1024 } });
+  const W = c.ensureWorkspace('del-ws', { name: 'D' });
+  W.call('filePut', { path: 'old.js', baseVersion: 0, contentB64: Buffer.alloc(600 * 1024, 1).toString('base64') }, user);
+  W.call('filePut', { path: 'old.js', baseVersion: 1, deleted: true }, user);
+  W.saveNow();
+  assert.ok(W.call('fileGet', { path: 'old.js', version: 1 }, user).contentB64, 'the deleted content is still there');
+  W.call('fileRevert', { path: 'old.js', version: 1 }, user);
+  assert.equal(W.state.files['old.js'].deleted, false);
+  c.close();
+});
+
+test('the version before a change is recorded by version, even when sync arrives before the hook', () => {
+  const c = new Coordinator({ dataDir: tmp() });
+  const W = c.ensureWorkspace('order-ws', { name: 'O' });
+  W.call('filePut', { path: 'a.js', baseVersion: 0, contentB64: Buffer.from('original').toString('base64') }, user);
+  const t = W.call('createTask', { title: 'Rewrite a', mode: 'shared' }, user);
+  W.call('registerAgent', { agentId: 'agt_o', name: 'O', taskId: t.id }, user);
+  W.call('startTask', { taskId: t.id, agentId: 'agt_o' }, user);
+  const hash = require('crypto').createHash('sha256').update('agent rewrite').digest('hex');
+  W.call('filePut', { path: 'a.js', baseVersion: 1, contentB64: Buffer.from('agent rewrite').toString('base64') }, user); // sync first
+  W.call('fileEdited', { agentId: 'agt_o', path: 'a.js', hash }, user); // then the agent's hook
+  assert.equal(W.call('taskChanges', { taskId: t.id }, user)[0].beforeVersion, 1, 'Revert goes back to the original, not the agent\'s version');
+  c.close();
+});
+
+test('a sleeping agent keeps its task until it is actually offline; a displaced agent cannot finish it', () => {
+  const c = new Coordinator({ dataDir: tmp() });
+  const W = c.ensureWorkspace('stale-ws', { name: 'S' });
+  const t = W.call('createTask', { title: 'Long job' }, user);
+  W.call('registerAgent', { agentId: 'agt_a', name: 'A', taskId: t.id }, user);
+  W.call('startTask', { taskId: t.id, agentId: 'agt_a' }, user);
+  W.state.agents.agt_a.lastSeen = Date.now() - 2 * 60 * 1000; // asleep for 2 minutes
+  W.sweep();
+  assert.equal(W.state.agents.agt_a.status, 'stale');
+  W.call('registerAgent', { agentId: 'agt_b', name: 'B' }, user);
+  assert.throws(() => W.call('startTask', { taskId: t.id, agentId: 'agt_b' }, user), /A is working on this task/);
+  W.state.agents.agt_a.lastSeen = Date.now() - 20 * 60 * 1000; // gone for good
+  W.sweep();
+  assert.equal(W.state.tasks[t.id].status, 'ready');
+  W.call('startTask', { taskId: t.id, agentId: 'agt_b' }, user);
+  // A wakes up: it no longer has the task and can't complete or fail it.
+  W.call('registerAgent', { agentId: 'agt_a', name: 'A', taskId: t.id }, user);
+  assert.equal(W.state.agents.agt_a.taskId, null);
+  assert.throws(() => W.call('completeTask', { agentId: 'agt_a', taskId: t.id, summary: 'mine' }, user), /B has this task now/);
+  assert.throws(() => W.call('failTask', { agentId: 'agt_a', taskId: t.id, error: 'x' }, user), /B has this task now/);
+  assert.equal(W.state.tasks[t.id].status, 'running');
+  c.close();
+});
+
+test('acknowledging a sync conflict keeps the unapplied edit until it is pruned a week later', () => {
+  const c = new Coordinator({ dataDir: tmp() });
+  const W = c.ensureWorkspace('ack-ws', { name: 'A' });
+  W.call('filePut', { path: 'x.js', baseVersion: 0, contentB64: Buffer.from('v1').toString('base64') }, user);
+  W.call('filePut', { path: 'x.js', baseVersion: 1, contentB64: Buffer.from('v2').toString('base64') }, user);
+  const r = W.call('filePut', { path: 'x.js', baseVersion: 1, contentB64: Buffer.from('mine').toString('base64') }, { user: { id: 'u2', name: 'Bo' } });
+  W.call('resolveConflictRecord', { conflictId: r.conflict, resolution: 'acknowledged' }, user);
+  W.saveNow();
+  assert.ok(W.call('conflictData', { conflictId: r.conflict }, user).incomingB64, 'still available');
+  W.state.conflicts[r.conflict].resolvedAt = Date.now() - 8 * 24 * 3600 * 1000;
+  W._prunedAt = 0; W.sweep(); W.saveNow();
+  assert.equal(W.state.conflicts[r.conflict], undefined, 'pruned after a week');
   c.close();
 });
