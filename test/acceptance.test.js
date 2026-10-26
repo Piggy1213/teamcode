@@ -194,9 +194,9 @@ test('3. two agents modifying the same file: overlap detected, edits merged, rea
   assert.equal(pre3, null, 'second attempt after the warning is allowed (no hard lock)');
 
   // Simultaneous edits to different regions of the same file are 3-way merged; nothing is lost.
-  fs.writeFileSync(path.join(dirA, 'shared.js'), base.replace('line 2', 'line 2 — nova'));
-  fs.writeFileSync(path.join(dirB, 'shared.js'), base.replace('line 7', 'line 7 — atlas'));
-  const merged = base.replace('line 2', 'line 2 — nova').replace('line 7', 'line 7 — atlas');
+  fs.writeFileSync(path.join(dirA, 'shared.js'), base.replace('line 2', 'line 2 (nova)'));
+  fs.writeFileSync(path.join(dirB, 'shared.js'), base.replace('line 7', 'line 7 (atlas)'));
+  const merged = base.replace('line 2', 'line 2 (nova)').replace('line 7', 'line 7 (atlas)');
   await waitFor(() => read(dirA, 'shared.js') === merged && read(dirB, 'shared.js') === merged, { label: 'both folders to converge on the merged file', timeout: 10000 });
 
   // Same-line edits cannot be merged: a conflict is recorded and BOTH versions are kept.

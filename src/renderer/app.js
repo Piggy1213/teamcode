@@ -78,11 +78,11 @@ function evKind(t) {
 
 function eventRow(e, { compact } = {}) {
   const [cls, ico] = evKind(e.type);
-  const delivered = e.deliveredTo?.length ? ` · delivered to ${esc(e.deliveredTo.join(', '))}` : '';
+  const delivered = e.deliveredTo?.length ? `, delivered to ${esc(e.deliveredTo.join(', '))}` : '';
   const task = e.task && S.state?.tasks[e.task];
-  return `<div class="ev ${cls}" title="${esc(e.type)} · #${e.seq}">
+  return `<div class="ev ${cls}" title="${esc(e.type)} #${e.seq}">
     <div class="ico">${icon(ico)}</div>
-    <div class="txt"><div>${esc(e.summary)}</div>${compact ? '' : `<div class="meta">${esc(e.actor.name)} · ${esc(e.type)}${task ? ` · ${esc(task.title)}` : ''}${e.branch && e.branch !== 'main' ? ` · ${esc(e.branch)}` : ''}${delivered}</div>`}</div>
+    <div class="txt"><div>${esc(e.summary)}</div>${compact ? '' : `<div class="meta">${esc(e.actor.name)}, ${esc(e.type)}${task ? `, ${esc(task.title)}` : ''}${e.branch && e.branch !== 'main' ? `, ${esc(e.branch)}` : ''}${delivered}</div>`}</div>
     <div class="time" title="${new Date(e.ts).toLocaleString()}">${clock(e.ts)}</div>
   </div>`;
 }
@@ -205,7 +205,7 @@ function shell() {
   return `<div class="shell">
     <aside class="sidebar">
       <div class="side-head">
-        <button class="proj-switch" data-act="close-project" title="${esc(p.root)}. Click for all projects.">${brandMark(26)}<span class="spacer"><span class="proj ellipsis" style="display:block">${esc(p.name)}</span><span class="sub">${p.role === 'host' ? (p.shared ? 'Hosting · shared' : 'Hosting') : 'Joined'}</span></span></button>
+        <button class="proj-switch" data-act="close-project" title="${esc(p.root)}. Click for all projects.">${brandMark(26)}<span class="spacer"><span class="proj ellipsis" style="display:block">${esc(p.name)}</span><span class="sub">${p.role === 'host' ? (p.shared ? 'Hosting, shared' : 'Hosting') : 'Joined'}</span></span></button>
       </div>
       ${nav}
       <div class="spacer"></div>
@@ -247,7 +247,7 @@ function agentCard(a) {
   return `<div class="agent-card ${cls}">
     <div class="sec">
       <div class="row">${avatar(a.name)}<div class="spacer"><div class="row"><b>${esc(a.name)}</b><span class="spacer"></span>${statusPill(a.status)}</div>
-        <div class="tiny faint ellipsis">${esc(a.client)}${owner ? ` · ${esc(owner)}'s computer` : ''}${rt?.costUsd ? ` · <span class="num" title="Claude usage cost">$${rt.costUsd.toFixed(2)}</span>` : ''}</div></div>
+        <div class="tiny faint ellipsis">${esc(a.client)}${owner ? `, ${esc(owner)}'s computer` : ''}${rt?.costUsd ? `, <span class="num" title="Claude usage cost">$${rt.costUsd.toFixed(2)}</span>` : ''}</div></div>
       </div>
       ${t ? `<div class="task-line" title="${esc(t.title)}">${esc(t.title)}</div>
         <div class="meta-line">${taskPill(t.status)}${a.mode === 'isolated' ? `<span class="mono" title="Branch">${icon('branch')}${esc(a.branch)}</span>` : `<span>${icon('folder')}shared copy</span>`}${t.review?.state === 'pending' ? '<span class="tag blue">Awaiting review</span>' : ''}${t.integration?.state === 'merged' ? '<span class="tag green">Merged</span>' : ''}</div>` : '<span class="muted">No task assigned</span>'}
@@ -261,7 +261,7 @@ function agentCard(a) {
       ${waiting.length ? `<div class="warnbox">${icon('clock')}<span>Waiting on ${waiting.map((d) => esc(d.title)).join(', ')}</span></div>` : ''}
     </div>` : ''}
     <div class="foot">
-      <span class="tiny faint" title="${a.pendingEvents ? 'Relevant team updates not yet delivered to this agent' : 'All relevant updates delivered'}">${a.pendingEvents ? `${icon('inbox')} ${a.pendingEvents} pending` : 'Up to date'} · seen ${ago(a.lastSeen)}</span>
+      <span class="tiny faint" title="${a.pendingEvents ? 'Relevant team updates not yet delivered to this agent' : 'All relevant updates delivered'}">${a.pendingEvents ? `${icon('inbox')} ${a.pendingEvents} pending` : 'Up to date'}, seen ${ago(a.lastSeen)}</span>
       <span class="spacer"></span>
       ${rt ? `<button class="btn sm ghost" data-act="agent-msg" data-id="${a.id}">${icon('message')}Message</button><button class="btn sm" data-act="agent-log" data-id="${a.id}">${icon('terminal')}Log</button>` : `<button class="btn sm" data-act="agent-detail" data-id="${a.id}">Details</button>`}
       ${rt?.running ? `<button class="icon-btn" data-act="agent-stop" data-id="${a.id}" title="Stop agent" style="color:var(--red)">${icon('stop')}</button>` : ''}
@@ -292,7 +292,7 @@ function viewAgents() {
       </div>
       ${live.length ? `<div class="section-label"><h4>Running</h4><span class="faint num tiny">${live.length}</span></div><div class="agent-grid">${live.map(agentCard).join('')}</div>`
         : emptyState('agent', 'No agents running', 'Each task gets its own Claude Code agent. Start a task and its agent sees everyone else\'s work as it happens.', START_ACTIONS)}
-      ${finished.length ? `<details class="more" style="margin-top:22px"><summary>${icon('down')}Finished agents · ${finished.length}</summary><div class="agent-grid" style="margin-top:12px">${finished.map(agentCard).join('')}</div></details>` : ''}
+      ${finished.length ? `<details class="more" style="margin-top:22px"><summary>${icon('down')}Finished agents (${finished.length})</summary><div class="agent-grid" style="margin-top:12px">${finished.map(agentCard).join('')}</div></details>` : ''}
     </div>
     <div class="panel" style="display:flex;flex-direction:column">
       <div class="panel-head"><span class="st green pulse"></span><h3>Live activity</h3><span class="spacer"></span><button class="btn sm ghost" data-act="view" data-view="activity">View all</button></div>
@@ -367,15 +367,15 @@ function viewTasks() {
   if (S.showClosed) cols.push(['Cancelled', 'x', 'muted', all.filter((t) => t.status === 'cancelled')]);
   const body = S.taskMode === 'board'
     ? `<div class="board">${cols.map(([title, ico, tone, list]) => `<div class="column"><div class="column-head ${tone}">${icon(ico)}${title}<span class="n">${list.length}</span></div>${list.map(taskCard).join('')}</div>`).join('')}</div>`
-    : `<div class="waves">${waves(all.filter((t) => t.status !== 'cancelled')).map((w, i) => `<div class="wave"><div class="wave-head"><b>Wave ${i + 1}</b><span>${i === 0 ? 'No open dependencies' : `Starts after wave ${i}`} · ${w.length} in parallel</span></div>${w.map(taskCard).join('')}</div>`).join('')}</div>`;
+    : `<div class="waves">${waves(all.filter((t) => t.status !== 'cancelled')).map((w, i) => `<div class="wave"><div class="wave-head"><b>Wave ${i + 1}</b><span>${i === 0 ? 'No open dependencies' : `Starts after wave ${i}`}, ${w.length} in parallel</span></div>${w.map(taskCard).join('')}</div>`).join('')}</div>`;
   const startable = ready.filter((t) => !t.runner || t.runner === me().id).length;
   return `<div class="view" data-scroll="tasks">
     <div class="view-head">
       <div class="seg"><button class="${S.taskMode === 'board' ? 'on' : ''}" data-act="task-mode" data-mode="board">Board</button><button class="${S.taskMode === 'waves' ? 'on' : ''}" data-act="task-mode" data-mode="waves">Parallel plan</button></div>
-      <span class="muted small"><span class="num">${ready.length}</span> can start · <span class="num">${running.length}</span> running · <span class="num">${waiting.length}</span> waiting</span>
+      <span class="muted small"><span class="num">${ready.length}</span> can start, <span class="num">${running.length}</span> running, <span class="num">${waiting.length}</span> waiting</span>
       <span class="spacer"></span>
       <label class="check small muted"><input type="checkbox" data-act="toggle-closed" ${S.showClosed ? 'checked' : ''}> Show cancelled</label>
-      ${startable > 1 ? `<button class="btn sm" data-act="start-all-ready">${icon('play')}Start all ready · ${startable}</button>` : ''}
+      ${startable > 1 ? `<button class="btn sm" data-act="start-all-ready">${icon('play')}Start all ready (${startable})</button>` : ''}
     </div>
     ${conflictsInReady.length ? `<div class="banner warn" style="margin-bottom:16px">${icon('warn')}<span>${conflictsInReady.map((t) => `“${esc(t.title)}”`).join(', ')} expect to touch the same files as other ready or running tasks. Run them one after another, or add a dependency.</span></div>` : ''}
     ${body}
@@ -423,8 +423,8 @@ function reviewDetail(t) {
   } else if (d?.kind === 'shared') {
     diffHtml = d.files.length ? d.files.map((f) => {
       const hunks = f.binary ? [] : TCDiff.lineDiff(f.before, f.after);
-      const note = f.changedByOthersSince?.length ? ` · also changed by ${[...new Set(f.changedByOthersSince)].join(', ')}` : '';
-      return diffFile(f.path, hunks, `${f.beforeVersion ? `v${f.beforeVersion}` : 'new'} → v${f.afterVersion} · ${f.lastBy}${note}`, f.binary);
+      const note = f.changedByOthersSince?.length ? `, also changed by ${[...new Set(f.changedByOthersSince)].join(', ')}` : '';
+      return diffFile(f.path, hunks, `${f.beforeVersion ? `v${f.beforeVersion}` : 'new'} → v${f.afterVersion}, ${f.lastBy}${note}`, f.binary);
     }).join('') : '<div class="muted">No file changes recorded for this task.</div>';
   }
   const spin = (k, ico) => (busy === k ? '<span class="spinner"></span>' : icon(ico));
@@ -443,8 +443,8 @@ function reviewDetail(t) {
       <button class="icon-btn" data-act="rv-refresh" data-id="${t.id}" title="Refresh diff">${icon('refresh')}</button>
     </div>
     ${t.integration?.conflicts?.length ? `<div class="errbox">${icon('x')}<span>Merge conflicts in ${t.integration.conflicts.map((c) => `<code>${esc(c)}</code>`).join(' ')}</span></div>` : ''}
-    ${t.integration?.risks?.length ? `<div class="col" style="gap:6px">${t.integration.risks.map((r) => `<div class="warnbox">${icon('warn')}<span><b>${esc(r.kind)}</b> · ${esc(r.message)}</span></div>`).join('')}</div>` : ''}
-    ${t.tests?.output ? `<details class="more"><summary>${icon('terminal')}Test output · <span class="mono">${esc(t.tests.command || '')}</span> · ${Math.round((t.tests.durationMs || 0) / 1000)}s</summary><pre class="out" style="margin-top:8px">${esc(t.tests.output)}</pre></details>` : ''}
+    ${t.integration?.risks?.length ? `<div class="col" style="gap:6px">${t.integration.risks.map((r) => `<div class="warnbox">${icon('warn')}<span><b>${esc(r.kind)}</b>: ${esc(r.message)}</span></div>`).join('')}</div>` : ''}
+    ${t.tests?.output ? `<details class="more"><summary>${icon('terminal')}Test output: <span class="mono">${esc(t.tests.command || '')}</span>, ${Math.round((t.tests.durationMs || 0) / 1000)}s</summary><pre class="out" style="margin-top:8px">${esc(t.tests.output)}</pre></details>` : ''}
     <div><h4 style="margin-bottom:8px">Changes</h4>${diffHtml}</div>
   </div>`;
 }
@@ -469,7 +469,7 @@ function viewReview() {
     for (const r of rows) byWho[r.by] = (byWho[r.by] || 0) + 1;
     return `<div class="view"><div class="panel">${tabs}<div class="panel-body">
       <div class="row wrap" style="margin-bottom:12px;gap:14px">${Object.entries(byWho).map(([n, c]) => `<span class="row small" style="gap:6px">${avatar(n, 'sm')} ${esc(n)} <span class="faint num">${c}</span></span>`).join('')}</div>
-      <table class="t"><tr><th>File</th><th>Changed by</th><th>Where</th><th>When</th></tr>${rows.map((r) => `<tr><td class="mono">${esc(r.path)}${r.deleted ? ' <span class="tag red">deleted</span>' : ''}</td><td>${icon(r.kind === 'agent' ? 'agent' : 'user', 'faint')} ${esc(r.by)}</td><td>${esc(r.where)}${r.task && S.state.tasks[r.task] ? ` · ${esc(S.state.tasks[r.task].title)}` : ''}</td><td class="faint">${ago(r.at)}</td></tr>`).join('')}</table>
+      <table class="t"><tr><th>File</th><th>Changed by</th><th>Where</th><th>When</th></tr>${rows.map((r) => `<tr><td class="mono">${esc(r.path)}${r.deleted ? ' <span class="tag red">deleted</span>' : ''}</td><td>${icon(r.kind === 'agent' ? 'agent' : 'user', 'faint')} ${esc(r.by)}</td><td>${esc(r.where)}${r.task && S.state.tasks[r.task] ? `, ${esc(S.state.tasks[r.task].title)}` : ''}</td><td class="faint">${ago(r.at)}</td></tr>`).join('')}</table>
       ${rows.length ? '' : '<div class="empty">No changes yet.</div>'}
     </div></div></div>`;
   }
@@ -477,7 +477,7 @@ function viewReview() {
     <div class="panel">${tabs}${list.map((t) => `<div class="list-item ${sel?.id === t.id ? 'on' : ''}" data-act="rv-select" data-id="${t.id}">
       <b class="ellipsis">${esc(t.title)}</b>
       <div class="row wrap" style="gap:10px">${t.review?.state === 'pending' ? '<span class="st blue">Needs review</span>' : t.review?.state === 'approved' ? '<span class="st green">Approved</span>' : t.review?.state === 'rejected' ? '<span class="st red">Rejected</span>' : '<span class="st">No review</span>'}${t.integration?.state === 'merged' ? '<span class="tag green">Merged</span>' : t.integration?.state === 'conflicts' ? '<span class="tag red">Conflicts</span>' : ''}${t.tests?.state === 'failed' ? '<span class="tag red">Tests fail</span>' : t.tests?.state === 'passed' ? '<span class="tag green">Tests pass</span>' : ''}</div>
-      <div class="tiny faint">${esc(t.assigneeName || '')} ${t.completedAt ? '· ' + ago(t.completedAt) : ''}</div>
+      <div class="tiny faint">${esc(t.assigneeName || '')}${t.completedAt ? `${t.assigneeName ? ', ' : ''}${ago(t.completedAt)}` : ''}</div>
     </div>`).join('') || '<div class="empty small">Completed tasks show up here for review.</div>'}</div>
     <div class="panel panel-body" data-scroll="review" style="padding:20px">${sel ? reviewDetail(sel) : `<div class="empty"><div class="ei">${icon('review')}</div><h3>Nothing to review yet</h3><div>When an agent finishes a task, its changes wait here for you.</div></div>`}</div>
   </div></div>`;
@@ -495,7 +495,7 @@ function viewContext() {
   const st = S.state;
   const tabs = [['contracts', 'braces', 'Contracts', Object.keys(st.contracts).length], ['decisions', 'compass', 'Decisions', st.decisions.length], ['blockers', 'block', 'Blockers', Object.values(st.blockers).filter((b) => b.status === 'open').length], ['conflicts', 'warn', 'Conflicts', Object.values(st.conflicts).filter((c) => c.status === 'open').length], ['notes', 'bulb', 'Notes', st.notes.length], ['coordination', 'exchange', 'Requests', st.coordination.length]];
   let body = '';
-  const by = (o) => `<span class="faint tiny">${esc(o.by?.name || o.by || '')} · ${ago(o.at)}</span>`;
+  const by = (o) => `<span class="faint tiny">${esc(o.by?.name || o.by || '')}, ${ago(o.at)}</span>`;
   const intro = (text, btn = '') => `<div class="view-head"><span class="muted small spacer">${text}</span>${btn}</div>`;
   const none = (text) => `<div class="empty">${text}</div>`;
   if (S.ctxTab === 'contracts') {
@@ -516,7 +516,7 @@ function viewContext() {
   } else if (S.ctxTab === 'notes') {
     body = st.notes.slice().reverse().map((n) => `<div class="card"><div class="row top">${icon(n.kind === 'error' ? 'bug' : 'bulb', 'faint')}<div class="spacer"><div>${esc(n.message)}</div>${n.files?.length ? `<div class="files" style="margin-top:6px">${n.files.map((f) => `<span class="chip">${esc(f)}</span>`).join('')}</div>` : ''}</div>${by(n)}</div></div>`).join('') || none('Agents share discoveries here with <code>publish_update</code>.');
   } else {
-    body = st.coordination.slice().reverse().map((r) => `<div class="card"><div class="row"><b>${esc(r.from.name)}</b>${icon('arrow', 'faint')}<b>${esc(r.toName || 'all agents')}</b><span class="spacer"></span><span class="faint tiny">${ago(r.at)}</span></div><div><b>${esc(r.subject)}</b> <span class="muted">·</span> ${esc(r.message)}</div>${r.files?.length ? `<div class="files">${r.files.map((f) => `<span class="chip">${esc(f)}</span>`).join('')}</div>` : ''}</div>`).join('') || none('Agents use <code>request_coordination</code> to agree on shared files and interfaces.');
+    body = st.coordination.slice().reverse().map((r) => `<div class="card"><div class="row"><b>${esc(r.from.name)}</b>${icon('arrow', 'faint')}<b>${esc(r.toName || 'all agents')}</b><span class="spacer"></span><span class="faint tiny">${ago(r.at)}</span></div><div><b>${esc(r.subject)}</b>: ${esc(r.message)}</div>${r.files?.length ? `<div class="files">${r.files.map((f) => `<span class="chip">${esc(f)}</span>`).join('')}</div>` : ''}</div>`).join('') || none('Agents use <code>request_coordination</code> to agree on shared files and interfaces.');
   }
   return `<div class="view" data-scroll="context"><div style="max-width:880px"><div class="tabs">${tabs.map(([k, ico, l, n]) => `<button class="${S.ctxTab === k ? 'on' : ''}" data-act="ctx-tab" data-tab="${k}">${icon(ico)}${l}<span class="n">${n}</span></button>`).join('')}</div>${body}</div></div>`;
 }
@@ -601,9 +601,9 @@ function viewSettings() {
       <label class="field">Test command <span class="hint">Used by Run tests in Review</span><div class="row"><input id="set-test" class="mono" value="${esc(S.state.settings.testCommand || '')}" placeholder="npm test"><button class="btn" data-act="save-test">Save</button></div></label>
       <label class="field">Public server URL <span class="hint">If you expose your TeamCode port with a port-forward or tunnel, invites use this address</span><div class="row"><input id="set-public" value="${esc(s.publicUrl)}" placeholder="https://my-tunnel.example.com"><button class="btn" data-act="save-public">Save</button></div></label>`)}
     ${sec('Other agents', 'Any MCP client can join this workspace: Claude Code in a terminal, Claude desktop, IDEs.', `<div><button class="btn" data-act="external-agent">${icon('link')}Show connection settings</button></div>`)}
-    ${sec('Git', 'Isolated agent branches and merge review need a git repository.', !g ? '<span class="spinner"></span>' : g.repo ? `<div class="small">On <code>${esc(g.branch || '(no commits)')}</code> · <span class="num">${g.dirty}</span> uncommitted file${g.dirty === 1 ? '' : 's'}</div><div><button class="btn" data-act="checkpoint">Commit working copy (checkpoint)</button></div>` : `<div class="small muted">This folder isn't a git repository.</div><div><button class="btn" data-act="init-git">Initialize git repository</button></div>`)}
+    ${sec('Git', 'Isolated agent branches and merge review need a git repository.', !g ? '<span class="spinner"></span>' : g.repo ? `<div class="small">On <code>${esc(g.branch || '(no commits)')}</code>, <span class="num">${g.dirty}</span> uncommitted file${g.dirty === 1 ? '' : 's'}</div><div><button class="btn" data-act="checkpoint">Commit working copy (checkpoint)</button></div>` : `<div class="small muted">This folder isn't a git repository.</div><div><button class="btn" data-act="init-git">Initialize git repository</button></div>`)}
     ${sec('Updates', 'TeamCode checks for new versions in the background and installs them when you restart.', updatesSetting())}
-    ${sec('Shortcuts', '', `<div class="col small" style="gap:6px"><div class="row"><span class="kbd">${MOD} N</span><span class="muted">New task</span></div><div class="row"><span class="kbd">${MOD} P</span><span class="muted">Plan a feature</span></div><div class="row"><span class="kbd">${MOD} 1–7</span><span class="muted">Switch views</span></div><div class="row"><span class="kbd">Esc</span><span class="muted">Close dialogs</span></div></div>`)}
+    ${sec('Shortcuts', '', `<div class="col small" style="gap:6px"><div class="row"><span class="kbd">${MOD} N</span><span class="muted">New task</span></div><div class="row"><span class="kbd">${MOD} P</span><span class="muted">Plan a feature</span></div><div class="row"><span class="kbd">${MOD} 1 to 7</span><span class="muted">Switch views</span></div><div class="row"><span class="kbd">Esc</span><span class="muted">Close dialogs</span></div></div>`)}
   </div></div>`;
 }
 
@@ -715,7 +715,7 @@ function renderPlan() {
     ${p.tasks.map((t, i) => `<div class="card" style="margin:0">
       <div class="row"><label class="check"><input type="checkbox" class="pl-on" data-i="${i}" ${t.on !== false ? 'checked' : ''}></label><span class="tag">#${i + 1}</span><input class="pl-title" data-i="${i}" value="${esc(t.title)}"><select class="pl-mode" data-i="${i}" style="width:150px"><option value="isolated" ${t.mode !== 'shared' ? 'selected' : ''}>Isolated</option><option value="shared" ${t.mode === 'shared' ? 'selected' : ''}>Shared</option></select></div>
       <textarea class="pl-desc" data-i="${i}" rows="3">${esc(t.description || '')}</textarea>
-      <div class="row wrap tiny muted">${(t.depends_on || []).length ? `Waits for: ${(t.depends_on || []).map((d) => `#${Number(d) + 1} ${esc(p.tasks[d]?.title || '')}`).join(', ')}` : 'Can start immediately'}${t.contract ? ` · Contract: <b>${esc(t.contract)}</b>` : ''}${(t.files || []).length ? ` · ${t.files.slice(0, 4).map((f) => `<span class="chip">${esc(f)}</span>`).join(' ')}` : ''}</div>
+      <div class="row wrap tiny muted">${(t.depends_on || []).length ? `Waits for: ${(t.depends_on || []).map((d) => `#${Number(d) + 1} ${esc(p.tasks[d]?.title || '')}`).join(', ')}` : 'Can start immediately'}${t.contract ? `, Contract: <b>${esc(t.contract)}</b>` : ''}${(t.files || []).length ? `, ${t.files.slice(0, 4).map((f) => `<span class="chip">${esc(f)}</span>`).join(' ')}` : ''}</div>
     </div>`).join('')}
     ${p.risks?.length ? `<div class="warnbox">${icon('warn')}<span>${p.risks.map(esc).join('<br>')}</span></div>` : ''}
     <label class="check"><input type="checkbox" id="plan-auto" checked> Start agents automatically as tasks become ready</label>
@@ -909,7 +909,7 @@ A['rv-select'] = (d) => { S.review.sel = d.id; render(); };
 A['rv-refresh'] = (d) => loadDiff(d.id, true);
 async function reviewBusy(kind, fn) { S.review.busy = kind; render(); try { return await fn(); } finally { S.review.busy = null; render(); } }
 A['rv-test'] = (d) => reviewBusy('test', () => run(() => api('review:test', { taskId: d.id })).then((r) => r && toast(r.passed ? 'Tests passed' : 'Tests failed', r.passed ? 'ok' : 'error')));
-A['rv-check'] = (d) => reviewBusy('check', () => run(() => api('review:check', { taskId: d.id })).then((r) => r && toast(r.state === 'clean' ? `Merges cleanly${r.risks.length ? ` · ${r.risks.length} risk(s) to look at` : ''}` : `${r.conflicts.length} conflict(s) with main`, r.state === 'clean' ? 'ok' : 'warn')));
+A['rv-check'] = (d) => reviewBusy('check', () => run(() => api('review:check', { taskId: d.id })).then((r) => r && toast(r.state === 'clean' ? `Merges cleanly${r.risks.length ? `, with ${r.risks.length} risk(s) to look at` : ''}` : `${r.conflicts.length} conflict(s) with main`, r.state === 'clean' ? 'ok' : 'warn')));
 A['rv-approve'] = (d) => reviewBusy('approve', async () => {
   let r = await run(() => api('review:approve', { taskId: d.id }));
   if (r?.needsCheckpoint) {

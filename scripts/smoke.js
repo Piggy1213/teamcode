@@ -13,5 +13,5 @@ const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'tc-smoke-'));
 fs.rmSync(out, { recursive: true, force: true });
 spawnSync(electron, [path.join(__dirname, '..')], { stdio: 'inherit', env: { ...process.env, TEAMCODE_SCREENSHOT: out, TEAMCODE_USERDATA: userData }, timeout: 120000 });
 const result = JSON.parse(fs.readFileSync(path.join(out, 'result.json'), 'utf8'));
-console.log(result.ok && !result.errors.length ? `UI smoke test passed — screenshots in ${out}` : `UI smoke test FAILED: ${result.error || result.errors.join('\n')}`);
+console.log(result.ok && !result.errors.length ? `UI smoke test passed. Screenshots in ${out}` : `UI smoke test FAILED: ${result.error || result.errors.join('\n')}`);
 process.exit(result.ok && !result.errors.length ? 0 : 1);

@@ -89,7 +89,7 @@ const log = (...a) => console.log(`[${((Date.now() - t0) / 1000).toFixed(0).padS
   const coord = ws.events.filter((e) => ['conflict.detected', 'contract.updated', 'decision.recorded', 'coordination.requested', 'note.added', 'blocker.reported'].includes(e.type));
   const delivered = [...ws.delivered.values()].reduce((n, s) => n + s.size, 0);
   console.log('\n================ LIVE TEST REPORT ================');
-  console.log(`Duration: ${((Date.now() - t0) / 60000).toFixed(1)} min · peak parallel agents: ${peak} · events: ${ws.state.seq} · event deliveries to agents: ${delivered}`);
+  console.log(`Duration: ${((Date.now() - t0) / 60000).toFixed(1)} min, peak parallel agents: ${peak}, events: ${ws.state.seq}, event deliveries to agents: ${delivered}`);
   console.log(`Agents: ${agents.map((a) => `${a.name} (${a.status}, edited ${Object.keys(a.edited).length} files, cost $${(session.agents.meta[a.id]?.costUsd || 0).toFixed(2)})`).join('; ')}`);
   for (const r of report) console.log(JSON.stringify(r));
   console.log(`Coordination events: ${coord.map((e) => `${e.type}: ${e.summary}`).join('\n  ') || 'none'}`);

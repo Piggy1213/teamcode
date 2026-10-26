@@ -30,13 +30,13 @@ addEventListener('scroll', () => nav.classList.toggle('scrolled', scrollY > 8), 
     const a = document.querySelector(`[data-dl="${k}"]`);
     const f = document.querySelector(`[data-file="${k}"]`);
     if (!a) continue;
-    if (p) { a.classList.remove('disabled'); f.textContent = `${p.file} · ${p.sizeMb} MB`; }
+    if (p) { a.classList.remove('disabled'); f.textContent = `${p.file}, ${p.sizeMb} MB`; }
     else a.querySelector('.go').textContent = 'Coming soon';
   }
   if (mine && info.platforms[mine]) {
     const hero = document.getElementById('hero-dl');
     hero.href = `/download/${mine}`;
     hero.querySelector('span').textContent = `Download for ${info.platforms[mine].label}`;
-    document.getElementById('hero-meta').innerHTML = `v${v} · Free · <a href="#download">Other platforms</a>`;
+    document.getElementById('hero-meta').innerHTML = `Version ${v}, free. <a href="#download">Other platforms</a>`;
   }
 })();

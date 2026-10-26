@@ -66,7 +66,7 @@
 
   if (page === 'app-login') {
     const code = (params.get('code') || '').toUpperCase().replace(/[^A-Z0-9-]/g, '').slice(0, 9);
-    $('#user-code').textContent = code || '········';
+    $('#user-code').textContent = code || 'XXXX-XXXX';
     (async () => {
       if (!code) return show('This link is missing its code. Start again from the TeamCode app.');
       const user = await navAccount();

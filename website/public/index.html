@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>TeamCode: your team and its AI agents, on one codebase</title>
-  <meta name="description" content="TeamCode is a desktop app for Mac and Windows. Your whole dev team and everyone's Claude Code agents work on the same project at once, see each other's changes in real time, and merge safely.">
+  <title>TeamCode: your team and its agents, on one codebase</title>
+  <meta name="description" content="TeamCode is a desktop app for Mac and Windows. Your whole dev team and everyone's coding agents work on the same project at once, see each other's changes in real time, and merge safely.">
   <link rel="icon" href="/img/icon.png">
   <meta property="og:title" content="TeamCode">
   <meta property="og:description" content="Your team and its AI agents, working on one codebase at the same time.">
@@ -73,14 +73,6 @@
     .window .bar span { margin-left: auto; margin-right: auto; font: 11px var(--mono); color: #6a6963; transform: translateX(-20px); }
     .window.full { border-radius: 10px; border-bottom: 1px solid #2a2a27; }
 
-    /* spec strip */
-    .spec { display: grid; grid-template-columns: repeat(4, 1fr); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); margin-top: 72px; }
-    .spec div { padding: 22px 24px 24px 0; border-right: 1px solid var(--line); }
-    .spec div + div { padding-left: 24px; }
-    .spec div:last-child { border-right: none; }
-    .spec b { display: block; font-weight: 500; margin: 6px 0 4px; font-size: 16px; }
-    .spec p { margin: 0; color: var(--muted); font-size: 14.5px; line-height: 1.5; }
-
     /* sections */
     section { padding: 120px 0 0; }
     h2 { font-size: clamp(32px, 4.2vw, 52px); line-height: 1.04; letter-spacing: -.035em; font-weight: 600; margin: 14px 0 0; max-width: 18ch; }
@@ -93,30 +85,35 @@
     .feature .copy h3 { font-size: 22px; line-height: 1.2; letter-spacing: -.02em; font-weight: 600; margin: 0; }
     .feature .copy p { margin: 0; color: var(--muted); font-size: 15.5px; }
     .feature .copy ul { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; border-top: 1px solid var(--line-2); }
-    .feature .copy li { padding: 11px 0; border-bottom: 1px solid var(--line-2); font-size: 14.5px; display: grid; grid-template-columns: 28px 1fr; }
-    .feature .copy li span:first-child { font: 12px/1.9 var(--mono); color: var(--faint); }
+    .feature .copy li { padding: 11px 0; border-bottom: 1px solid var(--line-2); font-size: 14.5px; }
     .feature .shot { padding: 36px 0 0 0; overflow: hidden; }
     .feature .shot .window { margin-left: 0; border-right: none; border-radius: 10px 0 0 0; }
     .feature.rev { grid-template-columns: 1fr 340px; }
     .feature.rev .copy { order: 2; }
     .feature.rev .shot .window { border-radius: 0 10px 0 0; border-left: none; border-right: 1px solid #2a2a27; }
 
-    /* capabilities: numbered spec sheet */
-    .caps { display: grid; grid-template-columns: repeat(3, 1fr); margin-top: 48px; border-top: 1px solid var(--line); }
-    .cap { padding: 28px 28px 32px 0; border-bottom: 1px solid var(--line); }
-    .cap:not(:nth-child(3n)) { border-right: 1px solid var(--line); }
-    .cap:not(:nth-child(3n+1)) { padding-left: 28px; }
-    .cap h3 { font-size: 18px; letter-spacing: -.015em; font-weight: 600; margin: 10px 0 8px; }
-    .cap p { margin: 0; color: var(--muted); font-size: 15px; }
+    /* capabilities: plain definition list */
+    .caps { display: grid; grid-template-columns: 1fr 1fr; gap: 0 64px; margin: 56px 0 0; max-width: 1040px; }
+    .caps div { padding: 18px 0; border-top: 1px solid var(--line); }
+    .caps dt { display: inline; font-weight: 600; }
+    .caps dd { display: inline; margin: 0 0 0 4px; color: var(--muted); }
 
-    /* steps */
-    .steps { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0; margin-top: 48px; counter-reset: s; }
-    .step { counter-increment: s; padding: 0 24px 0 0; position: relative; }
-    .step::before { content: "0" counter(s); display: block; font: 500 13px var(--mono); color: var(--signal); padding-bottom: 14px; margin-bottom: 18px; border-bottom: 1px solid var(--line-2); }
-    .step h3 { margin: 0 0 6px; font-size: 18px; font-weight: 600; letter-spacing: -.015em; }
-    .step p { margin: 0; color: var(--muted); font-size: 15px; }
-    .req { display: flex; gap: 8px 22px; flex-wrap: wrap; margin-top: 40px; font: 13px var(--mono); color: var(--muted); }
-    .req span::before { content: "/ "; color: var(--faint); }
+    /* how it works: a story next to the activity it produces */
+    .how { display: grid; grid-template-columns: 1fr 1fr; gap: 64px; align-items: start; }
+    .how .sub + .sub { margin-top: 14px; }
+    .how .req { font-size: 14.5px; color: var(--faint); margin: 28px 0 0; max-width: 52ch; }
+    .log { background: #121211; color: #e9e8e3; border: 1px solid #2a2a27; border-radius: 10px; overflow: hidden; font-size: 14px; box-shadow: 0 30px 80px -40px rgba(20, 20, 18, .5); }
+    .log-head { display: flex; align-items: center; gap: 8px; padding: 12px 16px; border-bottom: 1px solid #2a2a27; font-weight: 500; font-size: 13px; }
+    .log-head .dot { width: 7px; height: 7px; border-radius: 2px; background: #3fd08a; }
+    .log ol { list-style: none; margin: 0; padding: 6px 16px 10px; }
+    .log li { display: grid; grid-template-columns: 48px 1fr; gap: 8px; padding: 9px 0; border-bottom: 1px solid #222220; line-height: 1.45; }
+    .log li:last-child { border-bottom: none; }
+    .log time { font: 12px/1.7 var(--mono); color: #6a6963; }
+    .log b { font-weight: 500; color: #fff; }
+    .log code { background: #1e1e1c; border-color: #2c2c29; color: #e9e8e3; font-size: 12.5px; }
+    .log li.warn span { color: #f1b437; }
+    .log li.warn b { color: #f1b437; }
+    .log li.ok time { color: #3fd08a; }
 
     /* download */
     .download { margin-top: 120px; background: var(--ink); color: var(--ink-text); padding: 88px 0; }
@@ -159,28 +156,18 @@
 
     @media (max-width: 960px) {
       .hero-grid, .faq, .download .grid { grid-template-columns: 1fr; gap: 28px; }
-      .spec { grid-template-columns: 1fr 1fr; }
-      .spec div:nth-child(2) { border-right: none; }
-      .spec div:nth-child(-n+2) { border-bottom: 1px solid var(--line); }
-      .spec div:nth-child(3) { padding-left: 0; }
       .feature, .feature.rev { grid-template-columns: 1fr; }
       .feature.rev .copy { order: 0; }
       .feature .shot { padding: 0 0 0 24px; }
       .feature.rev .shot { padding: 0 24px 0 0; }
-      .caps { grid-template-columns: 1fr 1fr; }
-      .cap:nth-child(n) { border-right: none; padding-left: 0; }
-      .cap:nth-child(odd) { border-right: 1px solid var(--line); padding-right: 24px; }
-      .cap:nth-child(even) { padding-left: 24px; }
-      .steps { grid-template-columns: 1fr 1fr; gap: 36px 0; }
+      .how { grid-template-columns: 1fr; gap: 36px; }
       nav .links { display: none; }
     }
     @media (max-width: 600px) {
       .wrap { width: calc(100% - 32px); }
       .hero { padding-top: 56px; }
-      .spec, .caps, .steps { grid-template-columns: 1fr; }
-      .spec div, .spec div + div { padding: 18px 0; border-right: none; border-bottom: 1px solid var(--line); }
-      .spec div:last-child { border-bottom: none; }
-      .cap:nth-child(n) { border-right: none; padding: 24px 0; }
+      .caps { grid-template-columns: 1fr; }
+      .log li { grid-template-columns: 42px 1fr; }
       .window .bar span { display: none; }
       section { padding-top: 88px; }
       .feature .copy { padding: 24px; }
@@ -197,45 +184,36 @@
   <header class="hero"><div class="wrap">
     <div class="hero-grid">
       <div>
-        <div class="label">Desktop app · Mac &amp; Windows · Runs on Claude Code</div>
         <h1>Your whole team and every agent, on one codebase.</h1>
       </div>
       <div>
-        <p class="lede">TeamCode puts everyone's Claude Code agents on the same project at once. Each agent sees what the others are changing, builds against the interfaces they publish, and hands its work back for review. Nothing gets silently overwritten.</p>
+        <p class="lede">TeamCode puts everyone's coding agents on the same project at once. Each agent sees what the others are changing, builds against the interfaces they publish, and hands its work back for review. Nothing gets silently overwritten.</p>
         <div class="cta">
           <a class="btn primary" id="hero-dl" href="#download"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg><span>Download TeamCode</span></a>
           <a class="btn" href="#how">How it works</a>
         </div>
-        <div class="meta" id="hero-meta">Free · Windows 10+ and macOS 12+</div>
+        <div class="meta" id="hero-meta">Free for Mac and Windows</div>
       </div>
     </div>
     <div class="stage">
-      <div class="window"><div class="bar"><i></i><i></i><i></i><span>track-studio · TeamCode</span></div>
-        <img src="/img/agents.png" alt="TeamCode's Agents view: three Claude Code agents working in parallel, with file reservations, a conflict warning and a live activity feed" width="1360" height="860">
+      <div class="window"><div class="bar"><i></i><i></i><i></i><span>track-studio</span></div>
+        <img src="/img/agents.png" alt="TeamCode's Agents view: three agents working in parallel, with file reservations, a conflict warning and a live activity feed" width="1360" height="860">
       </div>
-    </div>
-    <div class="spec">
-      <div><span class="label">01 · Sync</span><b>Every save, everywhere</b><p>Files sync between everyone's folders as they're saved. Concurrent edits are 3-way merged.</p></div>
-      <div><span class="label">02 · Awareness</span><b>Agents know each other</b><p>Each agent knows which tasks, files and decisions the others are working on.</p></div>
-      <div><span class="label">03 · Isolation</span><b>One branch per task</b><p>Isolated agents work in their own git worktree, so nothing lands until you say so.</p></div>
-      <div><span class="label">04 · Review</span><b>Gated merges</b><p>Diffs, tests, conflict and API-break checks, then approve, reject or revert.</p></div>
     </div>
   </div></header>
 
   <section id="product"><div class="wrap">
-    <div class="label">Product</div>
     <h2>Built for a team of people <span class="muted-h">and their agents.</span></h2>
     <p class="sub">Coding agents usually work alone. TeamCode gives them shared awareness, so five agents act like one dev team instead of tripping over each other.</p>
 
     <div class="feature">
       <div class="copy">
-        <span class="label">Plan</span>
         <h3>Describe a feature. Watch it run in parallel.</h3>
-        <p>Claude reads the repo and splits the work into tasks with dependencies. The parallel plan shows what can start now and what waits.</p>
+        <p>Claude reads the repo and splits the work into tasks with dependencies. The parallel plan shows what can start now and what has to wait.</p>
         <ul>
-          <li><span>01</span><span>Independent tasks start at once, up to your per-computer limit.</span></li>
-          <li><span>02</span><span>Dependent tasks wait, then start from the work they need.</span></li>
-          <li><span>03</span><span>Overlap warnings flag tasks that will edit the same files.</span></li>
+          <li>Independent tasks start at once, up to your per-computer limit.</li>
+          <li>Dependent tasks wait, then start from the work they need.</li>
+          <li>You're warned when two tasks will edit the same files.</li>
         </ul>
       </div>
       <div class="shot"><div class="window"><div class="bar"><i></i><i></i><i></i></div><img src="/img/plan.png" alt="Parallel plan view grouping tasks into three waves" loading="lazy" width="1360" height="860"></div></div>
@@ -243,44 +221,52 @@
 
     <div class="feature rev">
       <div class="copy">
-        <span class="label">Review</span>
-        <h3>Nothing reaches main without passing four gates.</h3>
-        <p>Each agent works on its own branch. Before it merges you see the diff and whether it's safe: completed, tested, integrates cleanly, approved.</p>
+        <h3>Nothing reaches main until you've checked it.</h3>
+        <p>Each agent works on its own branch. Before it merges you see the diff, whether the tests pass, and whether it merges cleanly with everyone else's work.</p>
         <ul>
-          <li><span>01</span><span>Run your test command on the agent's branch in one click.</span></li>
-          <li><span>02</span><span>Integration checks catch conflicts, removed APIs and contract drift.</span></li>
-          <li><span>03</span><span>Reject or revert one task without losing anyone else's work.</span></li>
+          <li>Run your test command on the agent's branch in one click.</li>
+          <li>Integration checks catch conflicts, removed APIs and contract drift.</li>
+          <li>Reject or revert one task without losing anyone else's work.</li>
         </ul>
       </div>
-      <div class="shot"><div class="window"><div class="bar"><i></i><i></i><i></i></div><img src="/img/review.png" alt="Review view with the task, tests, integration and approval gates" loading="lazy" width="1360" height="860"></div></div>
+      <div class="shot"><div class="window"><div class="bar"><i></i><i></i><i></i></div><img src="/img/review.png" alt="Review view with the task, tests, integration and approval checks" loading="lazy" width="1360" height="860"></div></div>
     </div>
 
-    <div class="caps">
-      <div class="cap"><span class="label">Contracts</span><h3>Shared interfaces</h3><p>Agents publish the APIs they're building so dependent work starts straight away. They're told when a contract changes.</p></div>
-      <div class="cap"><span class="label">Decisions</span><h3>One set of rules</h3><p>Record an architectural decision once and every agent on the team is told to follow it.</p></div>
-      <div class="cap"><span class="label">Conflicts</span><h3>No silent overwrites</h3><p>Version checks before every edit, overlap warnings, and conflict records that keep both versions.</p></div>
-      <div class="cap"><span class="label">Coordination</span><h3>Agents talk directly</h3><p>Agents ask each other about shared files and interfaces, without you relaying messages.</p></div>
-      <div class="cap"><span class="label">Steering</span><h3>Message any agent</h3><p>Open an agent's live log to see every step and send it instructions mid-task.</p></div>
-      <div class="cap"><span class="label">Open</span><h3>Bring other agents</h3><p>Any MCP-capable agent can join a workspace through the TeamCode MCP server.</p></div>
-    </div>
+    <dl class="caps">
+      <div><dt>Shared interfaces.</dt><dd>Agents publish the APIs they're building, so work that depends on them starts straight away. They hear about it when one changes.</dd></div>
+      <div><dt>One set of rules.</dt><dd>Record an architectural decision once and every agent on the team follows it.</dd></div>
+      <div><dt>No silent overwrites.</dt><dd>Every edit is version-checked. When two edits really clash, both versions are kept for you to resolve.</dd></div>
+      <div><dt>Agents talk to each other.</dt><dd>They agree on shared files and interfaces directly, without you passing messages between them.</dd></div>
+      <div><dt>Steer any agent.</dt><dd>Open an agent's live log to watch every step and send it instructions mid-task.</dd></div>
+      <div><dt>Bring other tools.</dt><dd>Any MCP-capable agent can join a workspace and coordinate with the rest.</dd></div>
+    </dl>
   </div></section>
 
-  <section id="how"><div class="wrap">
-    <div class="label">How it works</div>
-    <h2>Up and running in minutes.</h2>
-    <p class="sub">Everyone uses their own Claude Code subscription. TeamCode coordinates the work.</p>
-    <div class="steps">
-      <div class="step"><h3>Open a project</h3><p>Pick a local folder or repo, or clone one from GitHub.</p></div>
-      <div class="step"><h3>Invite your team</h3><p>Share an invite code. Teammates join and the files sync to their machines.</p></div>
-      <div class="step"><h3>Plan and assign</h3><p>Add tasks or let Claude plan a feature. Agents start as their tasks become ready.</p></div>
-      <div class="step"><h3>Review and merge</h3><p>Watch every agent, then test, review and merge their work.</p></div>
+  <section id="how"><div class="wrap how">
+    <div>
+      <h2>A morning with TeamCode.</h2>
+      <p class="sub">Sam opens the repo and invites Lachie with a code. The files sync to his laptop. Sam asks for a track export feature, and Claude splits it into three tasks. Two agents start on Sam's machine and one on Lachie's, and they work out the overlap between themselves. By lunch the first task has passed its tests and Sam merges it.</p>
+      <p class="sub">Each person runs agents on their own computer with their own Claude Code subscription. TeamCode keeps them coordinated.</p>
+      <p class="req">You'll need Claude Code (Pro, Max, Team or an API key), git 2.38 or newer, and Windows 10 or macOS 12 or later.</p>
     </div>
-    <div class="req"><span>Claude Code (Pro, Max, Team or API)</span><span>git 2.38+</span><span>Windows 10 / 11</span><span>macOS 12+</span><span>Node.js recommended</span></div>
+    <div class="log" aria-label="Example activity in a TeamCode workspace">
+      <div class="log-head"><span class="dot"></span>Activity</div>
+      <ol>
+        <li><time>09:12</time><span><b>Sam</b> planned “Track export”. 3 tasks, 2 can start now.</span></li>
+        <li><time>09:13</time><span><b>Nova</b> started “Track data model” on <code>track-model</code></span></li>
+        <li><time>09:13</time><span><b>Pixel</b> started “Export to JSON and SVG” on Lachie's laptop</span></li>
+        <li><time>09:31</time><span><b>Nova</b> published the <code>track-model</code> interface</span></li>
+        <li><time>09:32</time><span><b>Pixel</b> switched to the published interface</span></li>
+        <li class="warn"><time>09:47</time><span><b>Atlas</b> and <b>Pixel</b> are both editing <code>track.ts</code>. Atlas asked Pixel which curve type to use.</span></li>
+        <li><time>09:49</time><span><b>Pixel</b> replied: cubic. Both carried on.</span></li>
+        <li class="ok"><time>10:20</time><span><b>Nova</b> finished. Tests pass and it merges cleanly.</span></li>
+        <li class="ok"><time>10:22</time><span><b>Sam</b> approved and merged into <code>main</code></span></li>
+      </ol>
+    </div>
   </div></section>
 
   <section id="download" class="download"><div class="wrap grid">
     <div>
-      <div class="label">Download</div>
       <h2>Get TeamCode.</h2>
       <p class="sub" id="dl-version">Checking for the latest version…</p>
       <div class="help">
@@ -289,14 +275,14 @@
       </div>
     </div>
     <div class="dl-list">
-      <a class="dl disabled" data-dl="mac-arm64" href="/download/mac-arm64"><span class="os"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M16.4 12.6c0-2.4 2-3.5 2-3.6-1.1-1.6-2.8-1.8-3.4-1.8-1.4-.2-2.8.8-3.5.8-.7 0-1.8-.8-3-.8-1.5 0-3 .9-3.8 2.3-1.6 2.8-.4 7 1.2 9.3.8 1.1 1.7 2.4 2.9 2.3 1.2 0 1.6-.7 3-.7s1.8.7 3 .7c1.3 0 2.1-1.1 2.8-2.3.9-1.3 1.3-2.6 1.3-2.6s-2.5-1-2.5-3.6zM14.1 5.6c.6-.8 1.1-1.9 1-3-.9 0-2.1.6-2.7 1.4-.6.7-1.1 1.8-1 2.9 1 .1 2.1-.5 2.7-1.3z"/></svg></span><span><b>macOS · Apple Silicon</b><span class="file" data-file="mac-arm64">M1, M2, M3, M4 and later</span></span><span class="go">Download →</span></a>
-      <a class="dl disabled" data-dl="mac-x64" href="/download/mac-x64"><span class="os"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M16.4 12.6c0-2.4 2-3.5 2-3.6-1.1-1.6-2.8-1.8-3.4-1.8-1.4-.2-2.8.8-3.5.8-.7 0-1.8-.8-3-.8-1.5 0-3 .9-3.8 2.3-1.6 2.8-.4 7 1.2 9.3.8 1.1 1.7 2.4 2.9 2.3 1.2 0 1.6-.7 3-.7s1.8.7 3 .7c1.3 0 2.1-1.1 2.8-2.3.9-1.3 1.3-2.6 1.3-2.6s-2.5-1-2.5-3.6zM14.1 5.6c.6-.8 1.1-1.9 1-3-.9 0-2.1.6-2.7 1.4-.6.7-1.1 1.8-1 2.9 1 .1 2.1-.5 2.7-1.3z"/></svg></span><span><b>macOS · Intel</b><span class="file" data-file="mac-x64">Intel Macs</span></span><span class="go">Download →</span></a>
-      <a class="dl disabled" data-dl="windows" href="/download/windows"><span class="os"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 5.5 10 4.5v7H3zM11 4.3 21 3v8.5H11zM3 12.5h7v7L3 18.5zM11 12.5h10V21l-10-1.4z"/></svg></span><span><b>Windows · 64-bit</b><span class="file" data-file="windows">Installer for Windows 10 and 11</span></span><span class="go">Download →</span></a>
+      <a class="dl disabled" data-dl="mac-arm64" href="/download/mac-arm64"><span class="os"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M16.4 12.6c0-2.4 2-3.5 2-3.6-1.1-1.6-2.8-1.8-3.4-1.8-1.4-.2-2.8.8-3.5.8-.7 0-1.8-.8-3-.8-1.5 0-3 .9-3.8 2.3-1.6 2.8-.4 7 1.2 9.3.8 1.1 1.7 2.4 2.9 2.3 1.2 0 1.6-.7 3-.7s1.8.7 3 .7c1.3 0 2.1-1.1 2.8-2.3.9-1.3 1.3-2.6 1.3-2.6s-2.5-1-2.5-3.6zM14.1 5.6c.6-.8 1.1-1.9 1-3-.9 0-2.1.6-2.7 1.4-.6.7-1.1 1.8-1 2.9 1 .1 2.1-.5 2.7-1.3z"/></svg></span><span><b>macOS for Apple Silicon</b><span class="file" data-file="mac-arm64">M1, M2, M3, M4 and later</span></span><span class="go">Download →</span></a>
+      <a class="dl disabled" data-dl="mac-x64" href="/download/mac-x64"><span class="os"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M16.4 12.6c0-2.4 2-3.5 2-3.6-1.1-1.6-2.8-1.8-3.4-1.8-1.4-.2-2.8.8-3.5.8-.7 0-1.8-.8-3-.8-1.5 0-3 .9-3.8 2.3-1.6 2.8-.4 7 1.2 9.3.8 1.1 1.7 2.4 2.9 2.3 1.2 0 1.6-.7 3-.7s1.8.7 3 .7c1.3 0 2.1-1.1 2.8-2.3.9-1.3 1.3-2.6 1.3-2.6s-2.5-1-2.5-3.6zM14.1 5.6c.6-.8 1.1-1.9 1-3-.9 0-2.1.6-2.7 1.4-.6.7-1.1 1.8-1 2.9 1 .1 2.1-.5 2.7-1.3z"/></svg></span><span><b>macOS for Intel</b><span class="file" data-file="mac-x64">Intel Macs</span></span><span class="go">Download →</span></a>
+      <a class="dl disabled" data-dl="windows" href="/download/windows"><span class="os"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 5.5 10 4.5v7H3zM11 4.3 21 3v8.5H11zM3 12.5h7v7L3 18.5zM11 12.5h10V21l-10-1.4z"/></svg></span><span><b>Windows 64-bit</b><span class="file" data-file="windows">Installer for Windows 10 and 11</span></span><span class="go">Download →</span></a>
     </div>
   </div></section>
 
   <section id="faq"><div class="wrap faq">
-    <div><div class="label">FAQ</div><h2>Questions.</h2></div>
+    <div><h2>Questions.</h2></div>
     <div class="qa">
       <details><summary>Do I need to pay for TeamCode?</summary><p>No. TeamCode is free. Each person uses their own Claude Code subscription or API key, and agent usage counts against that.</p></details>
       <details><summary>Where does my code go?</summary><p>Files sync directly between your team's computers through the workspace server, which is either the host's TeamCode app or a server you run yourself. Each workspace is protected by a secret token in its invite code.</p></details>
@@ -308,7 +294,6 @@
 
   <footer><div class="wrap">
     <a class="brand" href="/" style="font-size:14px"><svg viewBox="0 0 24 24" aria-hidden="true" style="width:18px;height:18px"><rect width="24" height="24" rx="5" fill="var(--ink)"/><path d="M7.5 6.5v11M12 6.5v6.5" stroke="var(--ink-text)" stroke-width="2.4" stroke-linecap="round"/><path d="M16.5 6.5v9" stroke="var(--signal)" stroke-width="2.4" stroke-linecap="round"/></svg>TeamCode</a>
-    <span>Built on Claude Code.</span>
     <span class="v" id="foot-version"></span>
     <a href="/terms">Terms</a>
     <a href="/privacy">Privacy</a>

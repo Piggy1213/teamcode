@@ -105,7 +105,7 @@ async function openSession(project) {
   saveConfig();
   session = new ProjectSession({ project, user: config.user, getSettings, send, dataDir: userData, scripts, notify });
   await session.start();
-  win?.setTitle(`${project.name} · TeamCode`);
+  win?.setTitle(`${project.name} | TeamCode`);
   return projectView(project);
 }
 
