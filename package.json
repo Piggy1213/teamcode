@@ -5,7 +5,7 @@
   "description": "Code together with your team: everyone's Claude Code sees everyone's changes in real time.",
   "main": "src/main/main.js",
   "teamcode": {
-    "siteUrl": ""
+    "siteUrl": "https://teamcode-production-60cc.up.railway.app"
   },
   "author": "TeamCode",
   "license": "MIT",
