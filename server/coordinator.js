@@ -42,7 +42,7 @@ const GROWTH_OPS = new Set(['createTask', 'createTasks', 'chat', 'publishUpdate'
 // only these still run: reading, finishing and cleaning up work, and changes to files the project already has.
 const CEILING_OK = new Set([
   'getContract', 'checkFiles', 'pullDigest', 'getUpdates', 'getContext', 'teamStatus', 'getAgent', 'findOverlaps', 'taskChanges',
-  'fileIndex', 'fileGet', 'conflictData', 'fileHistory', 'snapshot', 'events', 'userLeft', 'heartbeat', 'setAgentStatus', 'agentExited',
+  'fileIndex', 'fileGet', 'conflictData', 'fileHistory', 'snapshot', 'events', 'userJoined', 'userLeft', 'heartbeat', 'setAgentStatus', 'agentExited',
   'releaseFiles', 'completeTask', 'failTask', 'cancelTask', 'deleteTask', 'reopenTask', 'requestReview', 'reviewDecision', 'testCompleted',
   'integrationChecked', 'markMerged', 'markReverted', 'resolveBlocker', 'resolveConflictRecord', 'resolveConflict', 'fileRevert',
 ]);
@@ -53,6 +53,11 @@ const MAX_STRING = 64 * 1024; // any single text field, other than file/contract
 const MAX_LIST = 5000; // any single list
 const FREE_TEXT_OK = new Set(['contentB64', 'content', 'output']); // bounded elsewhere (file cap, args cap, output kept as last 8000 chars)
 const PRUNE_AFTER = 7 * 24 * 3600 * 1000; // finished agents and resolved conflicts are forgotten after a week
+const NOTICE_PRUNE_AFTER = 24 * 3600 * 1000; // overlap and integration-risk notices are advice; they go after a day
+const MAX_USERS = 500; // people one project remembers
+const MAX_OTHERS = 20; // other people's versions remembered per file a task changed
+const HASH_RE = /^[0-9a-f]{64}$/;
+const cleanHash = (h) => (typeof h === 'string' && HASH_RE.test(h) ? h : null);
 
 const rid = (p) => `${p}_${crypto.randomBytes(5).toString('hex')}`;
 const sha = (buf) => crypto.createHash('sha256').update(buf).digest('hex');
@@ -172,6 +177,20 @@ class Workspace extends EventEmitter {
     return keep;
   }
 
+  // Someone outside a task wrote a file that task changed: remember it on the task, so Revert skips the file
+  // even after history trimming has dropped that version.
+  _noteOthers(p, version, actor) {
+    if (!actor?.id) return;
+    for (const t of Object.values(this.state.tasks)) {
+      const c = t.changes?.[p];
+      // Records without `others` predate it; taskChanges treats gaps in their history as someone else's.
+      if (!c?.others || t.changeActors?.[actor.id] || t.status === 'cancelled' || t.integration?.state === 'reverted') continue;
+      c.others[version] = clip(actor.name, 60);
+      const vs = Object.keys(c.others).map(Number).sort((x, y) => x - y);
+      for (const v of vs.slice(0, Math.max(0, vs.length - MAX_OTHERS))) delete c.others[v];
+    }
+  }
+
   // Drops old versions (and their content) except the newest `newest` entries and the versions in `keep`.
   _dropHistory(f, newest, keep) {
     const cut = f.history.length - newest;
@@ -218,7 +237,8 @@ class Workspace extends EventEmitter {
       if (!ACTIVE.has(a.status) && a.status !== 'stale' && now - (a.lastSeen || 0) > PRUNE_AFTER && !holding.has(a.id)) { delete this.state.agents[a.id]; changed = true; }
     }
     for (const c of Object.values(this.state.conflicts)) {
-      if (c.status === 'resolved' && now - (c.resolvedAt || c.at || 0) > PRUNE_AFTER) { this._releaseConflict(c); delete this.state.conflicts[c.id]; changed = true; }
+      const notice = c.kind === 'overlap' || c.kind === 'integration_risk';
+      if ((c.status === 'resolved' && now - (c.resolvedAt || c.at || 0) > PRUNE_AFTER) || (notice && now - (c.at || 0) > NOTICE_PRUNE_AFTER)) { this._releaseConflict(c); delete this.state.conflicts[c.id]; changed = true; }
     }
     if (changed) this._saveSoon();
   }
@@ -391,7 +411,7 @@ class Workspace extends EventEmitter {
         // the version before the task is the one before that; otherwise it is the file's current version.
         const f = this.state.files[p];
         const before = e.version ? (f?.history.filter((h) => h.version < e.version).slice(-1)[0]?.version ?? e.version - 1) : (f?.version || 0);
-        t.changes[p] = { beforeVersion: before, by: e.actor.name, branch: e.branch };
+        t.changes[p] = { beforeVersion: before, by: e.actor.name, branch: e.branch, others: {} };
       }
       t.changes[p].lastBy = e.actor.name;
     }
@@ -467,9 +487,21 @@ class Workspace extends EventEmitter {
   _resumeTask(a) {
     const t = a.taskId && this.state.tasks[a.taskId];
     if (!t || t.status !== 'ready' || t.assignee !== a.id || t.releasedFrom !== a.id) return;
-    t.status = t.releasedStatus === 'blocked' ? 'blocked' : 'running'; t.updatedAt = Date.now();
+    // Still blocked only if its blocker is still open (someone may have resolved it meanwhile).
+    const blocked = t.releasedStatus === 'blocked' && Object.values(this.state.blockers).some((b) => b.taskId === t.id && b.status === 'open');
+    t.status = blocked ? 'blocked' : 'running'; t.updatedAt = Date.now();
     this._unrelease(t);
     this.emitEvent('task.updated', a, { task: t.id, data: { changes: { status: t.status }, reason: `${a.name} reconnected` } });
+    if (!blocked && a.status === 'blocked') this._setAgentStatus(a, 'working', 'unblocked');
+  }
+
+  // The agent lets go of its task: back to the queue if it was still running or blocked under it.
+  _dropTask(a, t, reason) {
+    this._unrelease(t);
+    if (t.assignee === a.id && ['running', 'blocked'].includes(t.status)) {
+      t.status = 'ready'; t.updatedAt = Date.now();
+      this.emitEvent('task.updated', a, { task: t.id, data: { changes: { status: 'ready' }, reason } });
+    }
   }
 
   // Whatever happens to a task after the sweep released it (started, reassigned, reopened, finished...)
@@ -513,7 +545,6 @@ class Workspace extends EventEmitter {
   _okAtCeiling(op, args, ctx) {
     if (CEILING_OK.has(op)) return true;
     if (PATH_OPS.has(op)) { const ps = arr(args.path ?? args.paths); return ps.length > 0 && ps.every((p) => this.state.files[normPath(p)]); }
-    if (op === 'userJoined') return !!this.state.users[(args.user || ctx.user)?.id];
     if (op === 'registerAgent') return !!this.state.agents[args.agentId];
     return false;
   }
@@ -522,7 +553,8 @@ class Workspace extends EventEmitter {
   op_userJoined({ user }, ctx) {
     const u = user || ctx.user;
     const existing = this.state.users[u.id];
-    this.state.users[u.id] = { id: u.id, name: u.name, online: true, lastSeen: Date.now() };
+    if (!existing && Object.keys(this.state.users).length >= MAX_USERS) throw new CoordError(`This project already has ${MAX_USERS} people.`, 'full');
+    this.state.users[u.id] = { id: u.id, name: clip(u.name, 60), online: true, lastSeen: Date.now() };
     if (!existing || !existing.online) this.emitEvent('user.joined', { kind: 'user', ...u });
     return this.state.users[u.id];
   }
@@ -550,28 +582,37 @@ class Workspace extends EventEmitter {
   }
 
   // ---------- agents ----------
-  op_registerAgent({ agentId, name, client, taskId, userId, mode, branch, cwd }, ctx) {
+  op_registerAgent({ agentId, name, client, taskId, userId, mode, branch, cwd, session }, ctx) {
     let a = agentId && this.state.agents[agentId];
+    session = session ? clip(session, 40) : null;
     if (a) {
       const wasInactive = !ACTIVE.has(a.status);
-      Object.assign(a, { client: client || a.client, cwd: cwd || a.cwd, lastSeen: Date.now() });
+      // The MCP server registers once per process, with a fresh session id.
+      const newSession = !!session && session !== a.session;
+      Object.assign(a, { client: client || a.client, cwd: cwd || a.cwd, lastSeen: Date.now(), session: session || a.session || null });
+      if (taskId) a.boundTask = taskId;
       // A reconnecting agent whose task has moved on to another live agent rejoins without it.
       if (taskId && taskId !== a.taskId) { try { this._assign(a, taskId); } catch (e) { if (e.code !== 'busy') throw e; } }
       const held = a.taskId && this.state.tasks[a.taskId];
       if (held && held.assignee && held.assignee !== a.id) a.taskId = null;
+      // A client with a fixed id (Claude Code added as MCP) keeps its id across sessions and never names a task.
+      // A new session of it starts without the old session's task, which goes back to the queue. (Clients too old
+      // to send a session id: a registration after the agent went inactive counts as a new session.)
+      if (!taskId && held && a.taskId === held.id && (newSession || (!session && wasInactive))) {
+        this._dropTask(a, held, `${a.name} started a new session`);
+        a.taskId = null;
+      }
       if (wasInactive) {
         this._setAgentStatus(a, 'working', 'reconnected');
-        // A TeamCode agent names its task when it registers, so it can carry on with it. A client with a fixed
-        // id (Claude Code added as MCP) that doesn't name one is a new session: it starts without the old task.
+        // A TeamCode agent names its task when it registers, so it can carry on with it.
         if (taskId && taskId === a.taskId) this._resumeTask(a);
-        else if (!taskId && held && a.taskId === held.id && !this._liveOwner(held)) { this._unrelease(held); a.taskId = null; }
       }
       const missed = this._relevantSince(a, a.cursor);
       return { agent: this._agentView(a), reconnected: true, missedCount: missed.length, missed: this._digestText(missed) };
     }
     a = {
       id: agentId || rid('agt'), name: name || 'Agent', client: client || 'MCP client', userId: userId || ctx.user?.id || null,
-      taskId: null, status: 'working', prevStatus: 'working', detail: '', mode: mode || 'shared', branch: branch || 'main',
+      taskId: null, boundTask: taskId || null, session, status: 'working', prevStatus: 'working', detail: '', mode: mode || 'shared', branch: branch || 'main',
       cwd: cwd || null, startedAt: Date.now(), lastSeen: Date.now(), cursor: this.state.seq, lastDigestAt: 0,
       reads: dict(), touched: dict(), edited: dict(), warned: dict(), updates: [], contractsSeen: dict(),
     };
@@ -622,14 +663,14 @@ class Workspace extends EventEmitter {
   op_heartbeat({ agentId, status, detail }) {
     const a = this.state.agents[agentId];
     if (!a) throw new CoordError('Unknown agent', 'unknown_agent');
-    if (status) this._setAgentStatus(a, status, detail);
+    if (status) this._setAgentStatus(a, clip(status, 40), clip(detail, 300));
     return { ok: true, pending: this._relevantSince(a, a.cursor).length };
   }
 
   op_setAgentStatus({ agentId, status, detail }) {
     const a = this.state.agents[agentId];
     if (!a) throw new CoordError('Unknown agent', 'unknown_agent');
-    this._setAgentStatus(a, status, detail);
+    this._setAgentStatus(a, clip(status, 40), clip(detail, 300));
     return this._agentView(a);
   }
 
@@ -639,14 +680,8 @@ class Workspace extends EventEmitter {
     this._releaseAll(a);
     // A task it was still on goes back to the queue rather than staying "running" under an agent that's gone.
     const t = a.taskId && this.state.tasks[a.taskId];
-    if (t && t.assignee === a.id) {
-      this._unrelease(t);
-      if (['running', 'blocked'].includes(t.status)) {
-        t.status = 'ready'; t.updatedAt = Date.now();
-        this.emitEvent('task.updated', a, { task: t.id, data: { changes: { status: 'ready' }, reason: `${a.name} stopped` } });
-      }
-    }
-    this._setAgentStatus(a, outcome || 'done', detail);
+    if (t && t.assignee === a.id) this._dropTask(a, t, `${a.name} stopped`);
+    this._setAgentStatus(a, clip(outcome || 'done', 40), clip(detail, 300));
     return true;
   }
 
@@ -838,7 +873,7 @@ class Workspace extends EventEmitter {
     this._mustOwn(t, agentId);
     if (t.status === 'done') return t;
     this._unrelease(t);
-    Object.assign(t, { status: 'done', completedAt: Date.now(), updatedAt: Date.now(), summary: String(summary || t.summary || '') });
+    Object.assign(t, { status: 'done', completedAt: Date.now(), updatedAt: Date.now(), summary: clip(summary || t.summary || '', 4000) });
     this.emitEvent('task.completed', actor, { task: t.id, branch: t.branch, data: { summary: t.summary } });
     this._recomputeReadiness(actor);
     this._annotateParallelism();
@@ -850,7 +885,7 @@ class Workspace extends EventEmitter {
     const t = this._task(taskId || actor.agent?.taskId);
     this._mustOwn(t, agentId);
     this._unrelease(t);
-    Object.assign(t, { status: 'failed', updatedAt: Date.now(), error: String(error || 'unknown error') });
+    Object.assign(t, { status: 'failed', updatedAt: Date.now(), error: clip(error || 'unknown error', 4000) });
     this.emitEvent('task.failed', actor, { task: t.id, data: { error: t.error } });
     return t;
   }
@@ -871,7 +906,7 @@ class Workspace extends EventEmitter {
     if (owner && owner.id !== agentId) throw new CoordError(`${owner.name} has this task; it can't be reopened until that agent stops.`, 'busy');
     const actor = this._actor({}, ctx);
     const changes = {};
-    if (runner !== undefined) { t.runner = runner || null; t.runnerName = runnerName || null; changes.runner = t.runner; }
+    if (runner !== undefined) { t.runner = runner ? clip(runner, 80) : null; t.runnerName = runnerName ? clip(runnerName, 60) : null; changes.runner = t.runner; }
     if (autoStart !== undefined) { t.autoStart = !!autoStart; changes.autoStart = t.autoStart; }
     t.status = 'waiting'; t.updatedAt = Date.now();
     this._unrelease(t);
@@ -936,7 +971,7 @@ class Workspace extends EventEmitter {
     const b = this.state.blockers[blockerId];
     if (!b) throw new CoordError('Unknown blocker');
     const actor = this._actor({ agentId }, ctx);
-    Object.assign(b, { status: 'resolved', resolution: resolution || '', resolvedBy: { id: actor.id, name: actor.name }, resolvedAt: Date.now() });
+    Object.assign(b, { status: 'resolved', resolution: clip(resolution || '', 2000), resolvedBy: { id: actor.id, name: actor.name }, resolvedAt: Date.now() });
     this.emitEvent('blocker.resolved', actor, { task: b.taskId, data: { id: b.id, description: b.description, resolution: b.resolution } });
     const t = b.taskId && this.state.tasks[b.taskId];
     if (t && t.status === 'blocked' && !Object.values(this.state.blockers).some((o) => o.taskId === t.id && o.status === 'open')) {
@@ -999,7 +1034,7 @@ class Workspace extends EventEmitter {
   _reserve(a, p, mode = 'shared', intent = '') {
     const holders = (this.state.reservations[p] ||= dict());
     const isNew = !holders[a.id];
-    holders[a.id] = { mode, intent: intent || holders[a.id]?.intent || '', at: holders[a.id]?.at || Date.now(), expires: Date.now() + RESERVATION_MS, taskId: a.taskId };
+    holders[a.id] = { mode, intent: clip(intent || holders[a.id]?.intent || '', 500), at: holders[a.id]?.at || Date.now(), expires: Date.now() + RESERVATION_MS, taskId: a.taskId };
     return isNew;
   }
 
@@ -1015,17 +1050,20 @@ class Workspace extends EventEmitter {
     const key = `${kind}|${p}|${[a.id, ...others.map((o) => o.agentId)].sort().join(',')}`;
     if (this.overlapKeys.get(key) > Date.now() - RECENT_EDIT_MS) return;
     this.overlapKeys.set(key, Date.now());
-    const id = rid('cfl');
     const message = kind === 'integration_risk'
       ? `${a.name} and ${others.map((o) => o.agentName).join(', ')} are changing ${p} on different branches. Merge carefully.`
       : `${a.name} and ${others.map((o) => o.agentName).join(', ')} are editing ${p} at the same time`;
-    this.state.conflicts[id] = { id, kind, path: p, agents: [a.id, ...others.map((o) => o.agentId)], message, status: kind === 'overlap' ? 'open' : 'watch', at: Date.now() };
+    // The same agents on the same file again: refresh the notice rather than adding another.
+    const prev = Object.values(this.state.conflicts).find((c) => c.key === key);
+    const id = prev?.id || rid('cfl');
+    this.state.conflicts[id] = { id, key, kind, path: p, agents: [a.id, ...others.map((o) => o.agentId)], message, status: kind === 'overlap' ? 'open' : 'watch', at: Date.now() };
     this.emitEvent('conflict.detected', a, { task: a.taskId, files: [p], branch: a.branch, data: { id, kind, message, agents: this.state.conflicts[id].agents } });
   }
 
   op_agentRead({ agentId, path: p, hash }) {
     const a = this.state.agents[agentId];
     p = normPath(p);
+    hash = cleanHash(hash);
     const f = this.state.files[p];
     a.reads[p] = { hash: hash || null, version: f && f.hash === hash ? f.version : null, at: Date.now() };
     a.touched[p] = Date.now();
@@ -1036,6 +1074,7 @@ class Workspace extends EventEmitter {
   op_preEdit({ agentId, path: p, diskHash, exists }) {
     const a = this.state.agents[agentId];
     p = normPath(p);
+    diskHash = cleanHash(diskHash);
     a.touched[p] = Date.now();
     const lastRead = a.reads[p];
     if (exists && lastRead && lastRead.hash && diskHash && lastRead.hash !== diskHash) {
@@ -1066,6 +1105,8 @@ class Workspace extends EventEmitter {
   op_fileEdited({ agentId, path: p, hash, deleted, summary }) {
     const a = this.state.agents[agentId];
     p = normPath(p);
+    hash = cleanHash(hash);
+    summary = clip(summary || '', 500);
     a.reads[p] = { hash: hash || null, version: null, at: Date.now() };
     a.touched[p] = Date.now();
     a.edited[p] = Date.now();
@@ -1083,14 +1124,17 @@ class Workspace extends EventEmitter {
           f.by = { kind: 'agent', id: a.id, name: a.name };
           const h = f.history.find((x) => x.version === f.version);
           if (h) h.by = f.by;
+          const mine = a.taskId && this.state.tasks[a.taskId]?.changes?.[p];
+          if (mine?.others) delete mine.others[f.version];
         }
       }
     }
-    return this.emitEvent(deleted ? 'file.deleted' : 'file.changed', a, { task: a.taskId, files: [p], branch: a.branch || 'main', version, data: { hash, summary: summary || '' } });
+    return this.emitEvent(deleted ? 'file.deleted' : 'file.changed', a, { task: a.taskId, files: [p], branch: a.branch || 'main', version, data: { hash, summary } });
   }
 
   op_announceEdit({ agentId, paths, intent, exclusive }) {
     const a = this.state.agents[agentId];
+    intent = clip(intent || '', 500);
     const ps = arr(paths).map(normPath);
     if (!ps.length) throw new CoordError('paths is required');
     const overlaps = [];
@@ -1297,9 +1341,10 @@ class Workspace extends EventEmitter {
     const actor = this._actor({ agentId }, ctx);
     const t = this._task(taskId || actor.agent?.taskId);
     this._mustOwn(t, agentId);
-    const changed = arr(files).length ? arr(files).map(normPath) : this._taskChangedFiles(t);
-    t.review = { state: 'pending', requestedBy: actor.name, at: Date.now(), summary: summary || t.summary || '', files: changed, stats: stats || null };
-    if (headCommit) t.headCommit = headCommit;
+    const changed = (arr(files).length ? arr(files).map(normPath) : this._taskChangedFiles(t)).slice(0, 2000).map((f) => clip(f, 500));
+    const st = stats && typeof stats === 'object' ? { files: +stats.files || 0, insertions: +stats.insertions || 0, deletions: +stats.deletions || 0 } : null;
+    t.review = { state: 'pending', requestedBy: actor.name, at: Date.now(), summary: clip(summary || t.summary || '', 4000), files: changed, stats: st };
+    if (headCommit) t.headCommit = clip(headCommit, 100);
     return this.emitEvent('changes.review_requested', actor, { task: t.id, branch: t.branch, files: changed, data: { summary: t.review.summary, fileCount: changed.length } });
   }
 
@@ -1314,12 +1359,15 @@ class Workspace extends EventEmitter {
     const t = this._task(taskId);
     const actor = this._actor({}, ctx);
     if (!['approve', 'reject'].includes(decision)) throw new CoordError('decision must be approve or reject');
-    t.review = { ...t.review, state: decision === 'approve' ? 'approved' : 'rejected', by: actor.name, decidedAt: Date.now(), note: note || '' };
-    return this.emitEvent(decision === 'approve' ? 'changes.approved' : 'changes.rejected', actor, { task: t.id, branch: t.branch, data: { note: note || '' } });
+    note = clip(note || '', 2000);
+    t.review = { ...t.review, state: decision === 'approve' ? 'approved' : 'rejected', by: actor.name, decidedAt: Date.now(), note };
+    return this.emitEvent(decision === 'approve' ? 'changes.approved' : 'changes.rejected', actor, { task: t.id, branch: t.branch, data: { note } });
   }
 
   op_testCompleted({ taskId, passed, output, command, durationMs }, ctx) {
     const t = taskId ? this._task(taskId) : null;
+    command = clip(command || '', 500);
+    durationMs = +durationMs || 0;
     if (t) t.tests = { state: passed ? 'passed' : 'failed', at: Date.now(), command, output: String(output || '').slice(-8000), durationMs };
     return this.emitEvent('test.completed', this._actor({}, ctx), { task: t?.id, branch: t?.branch, data: { passed: !!passed, command, durationMs } });
   }
@@ -1327,6 +1375,8 @@ class Workspace extends EventEmitter {
   op_integrationChecked({ taskId, conflicts = [], risks = [] }, ctx) {
     const t = this._task(taskId);
     const actor = this._actor({}, ctx);
+    conflicts = arr(conflicts).slice(0, 500).map((f) => clip(normPath(f), 500));
+    risks = arr(risks).slice(0, 200).map((r) => ({ kind: clip(r?.kind || 'risk', 40), message: clip(r?.message || '', 1000) }));
     // Contract drift: this task used contract versions that have since changed.
     for (const [n, v] of Object.entries(t.contractsUsed || {})) {
       const c = this.state.contracts[n];
@@ -1342,13 +1392,15 @@ class Workspace extends EventEmitter {
     }
     const state = conflicts.length ? 'conflicts' : 'clean';
     t.integration = { state, conflicts, risks, at: Date.now() };
-    // One merge-conflict record per task: a re-check updates it (or closes it once the merge is clean).
-    const open = Object.values(this.state.conflicts).find((c) => c.kind === 'merge' && c.taskId === t.id && c.status === 'open');
+    // One merge-conflict record per task: a re-check updates it (reopening it if needed), or closes it once clean.
+    const record = Object.values(this.state.conflicts).find((c) => c.kind === 'merge' && c.taskId === t.id);
+    const open = record?.status === 'open' ? record : null;
     if (conflicts.length) {
       const message = `Merging "${t.title}" conflicts with main in ${conflicts.length} file(s)`;
-      let c = open;
-      if (!c) { const id = rid('cfl'); c = this.state.conflicts[id] = { id, kind: 'merge', taskId: t.id, status: 'open' }; }
-      Object.assign(c,{ path: conflicts[0], files: conflicts, message, at: Date.now() });
+      let c = record;
+      if (!c) { const id = rid('cfl'); c = this.state.conflicts[id] = { id, kind: 'merge', taskId: t.id }; }
+      delete c.resolution; delete c.resolvedAt;
+      Object.assign(c, { status: 'open', path: conflicts[0], files: conflicts, message, at: Date.now() });
       this.emitEvent('conflict.detected', actor, { task: t.id, files: conflicts, branch: t.branch, data: { id: c.id, kind: 'merge', message } });
     } else if (open) {
       Object.assign(open, { status: 'resolved', resolution: 'merge is clean', resolvedAt: Date.now() });
@@ -1360,6 +1412,8 @@ class Workspace extends EventEmitter {
 
   op_markMerged({ taskId, commit, into }, ctx) {
     const t = this._task(taskId);
+    commit = commit ? clip(commit, 100) : commit;
+    into = into ? clip(into, 200) : into;
     t.integration = { ...t.integration, state: 'merged', mergedAt: Date.now(), commit, conflicts: [] };
     if (t.review.state !== 'approved') t.review = { ...t.review, state: 'approved', by: this._actor({}, ctx).name, decidedAt: Date.now() };
     for (const c of Object.values(this.state.conflicts)) if (c.taskId === t.id && c.kind === 'merge' && c.status === 'open') c.status = 'resolved';
@@ -1370,6 +1424,7 @@ class Workspace extends EventEmitter {
 
   op_markReverted({ taskId, commit }, ctx) {
     const t = this._task(taskId);
+    commit = commit ? clip(commit, 100) : commit;
     t.integration = { ...t.integration, state: 'reverted', revertedAt: Date.now(), revertCommit: commit };
     t.review = { ...t.review, state: 'reverted' };
     return this.emitEvent('changes.reverted', this._actor({}, ctx), { task: t.id, branch: t.branch, data: { commit } });
@@ -1381,9 +1436,19 @@ class Workspace extends EventEmitter {
     if (t.changes) {
       return Object.entries(t.changes).map(([p, c]) => {
         const f = this.state.files[p];
+        const before = c.beforeVersion || 0;
+        const others = new Map();
+        for (const h of f?.history || []) if (h.version > before && h.by?.id && !t.changeActors[h.by.id]) others.set(h.version, h.by.name);
+        for (const [v, name] of Object.entries(c.others || {})) if (+v > before) others.set(+v, name);
+        // Records from before other people's versions were remembered: versions missing from history after the
+        // starting point might have been anyone's, so Revert must not assume they were the task's.
+        if (!c.others && f) {
+          const kept = new Set(f.history.map((h) => h.version));
+          for (let v = before + 1; v <= f.version; v++) if (!kept.has(v)) { others.set(v, 'someone (older history was trimmed)'); break; }
+        }
         return {
           path: p, beforeVersion: c.beforeVersion, by: c.by, branch: c.branch, afterVersion: f?.version || null, lastBy: c.lastBy,
-          changedByOthersSince: f ? f.history.filter((h) => h.version > (c.beforeVersion || 0) && h.by?.id && !t.changeActors[h.by.id]).map((h) => h.by.name) : [],
+          changedByOthersSince: [...others.values()],
         };
       });
     }
@@ -1416,7 +1481,7 @@ class Workspace extends EventEmitter {
   op_resolveConflictRecord({ conflictId, resolution }, ctx) {
     const c = this.state.conflicts[conflictId];
     if (!c) throw new CoordError('Unknown conflict');
-    c.status = 'resolved'; c.resolution = resolution || 'acknowledged'; c.resolvedAt = Date.now();
+    c.status = 'resolved'; c.resolution = clip(resolution || 'acknowledged', 200); c.resolvedAt = Date.now();
     this.emitEvent('conflict.resolved', this._actor({}, ctx), { task: c.taskId, files: [c.path], data: { id: c.id, resolution: c.resolution } });
     return c;
   }
@@ -1445,6 +1510,7 @@ class Workspace extends EventEmitter {
     Object.assign(f, { hash, deleted: !!deleted, size: deleted ? 0 : buf.length, binary: deleted ? false : isBinary(buf), by: { kind: actor.kind, id: actor.id, name: actor.name }, at: Date.now() });
     f.history.push({ version: f.version, hash, deleted: !!deleted, by: f.by, at: f.at });
     this._ref(hash, 1);
+    this._noteOthers(p, f.version, actor);
     if (deleted && this.limits.maxBytes && this._usedBytes() > this.limits.maxBytes * 0.9) this._freeHistory(p, f);
     if (f.history.length > MAX_HISTORY) this._dropHistory(f, MAX_HISTORY, this._neededVersions(p));
     this.state.files[p] = f;
@@ -1497,6 +1563,9 @@ class Workspace extends EventEmitter {
         return { ok: true, version: f.version, hash: f.hash, merged: true, contentB64: mergedBuf.toString('base64') };
       }
     }
+    // The same stale write again (a retry): the conflict already holds it.
+    const same = Object.values(this.state.conflicts).find((c) => c.kind === 'sync' && c.status === 'open' && c.path === p && c.baseVersion === baseVersion && c.incomingHash === hash && !!c.incomingDeleted === !!deleted && c.incomingBy?.id === actor.id);
+    if (same) return { ok: false, conflict: same.id, version: cur.version };
     const id = rid('cfl');
     const incomingHash = buf ? this._putBlob(buf) : null;
     this._ref(incomingHash, 1);
@@ -1522,6 +1591,7 @@ class Workspace extends EventEmitter {
   op_resolveConflict({ conflictId, resolution, contentB64 }, ctx) {
     const c = this.state.conflicts[conflictId];
     if (!c || c.kind !== 'sync') throw new CoordError('Unknown sync conflict');
+    if (!['current', 'incoming', 'content'].includes(resolution)) throw new CoordError('resolution must be current, incoming or content');
     if (c.status === 'resolved' && c.released) throw new CoordError('This conflict was already resolved');
     const actor = this._actor({}, ctx);
     let buf = null, deleted = false;
@@ -1595,8 +1665,9 @@ class Workspace extends EventEmitter {
         this._setAgentStatus(a, 'offline', 'disconnected');
         const t = a.taskId && this.state.tasks[a.taskId];
         if (t && ['running', 'blocked'].includes(t.status) && t.assignee === a.id) {
-          // Marked, so this agent (and only this agent) can carry on with it if it comes back first.
-          t.releasedFrom = a.id; t.releasedStatus = t.status;
+          // Marked, so this agent (and only this agent) can carry on with it if it comes back first. Only an
+          // agent started for this task gets that; a fixed-id client can't tell its sessions apart.
+          if (a.boundTask === t.id) { t.releasedFrom = a.id; t.releasedStatus = t.status; }
           t.status = 'ready'; t.updatedAt = now;
           this.emitEvent('task.updated', null, { task: t.id, data: { changes: { status: 'ready' }, reason: `${a.name} disconnected; task returned to queue` } });
         }

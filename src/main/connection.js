@@ -68,7 +68,7 @@ class Connection extends EventEmitter {
         case 'error':
           this.fatal = m.error;
           this.emit('fatal', m.error, m.code);
-          if (m.code === 'unauthorized' || m.code === 'not_found') this.closed = true;
+          if (m.code === 'unauthorized' || m.code === 'not_found' || m.code === 'full') this.closed = true;
           break;
         default: break;
       }

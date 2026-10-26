@@ -84,7 +84,7 @@ async function agentCall(cfg, op, args = {}, timeoutMs) {
 function register(cfg) {
   return post(cfg, 'registerAgent', {
     agentId: cfg.agentId, name: cfg.name, client: cfg.client, taskId: cfg.taskId, userId: cfg.userId,
-    mode: cfg.mode, branch: cfg.branch, cwd: cfg.root,
+    mode: cfg.mode, branch: cfg.branch, cwd: cfg.root, session: cfg.session,
   });
 }
 

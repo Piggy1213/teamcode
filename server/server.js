@@ -157,13 +157,14 @@ class TeamServer {
       const w = this._workspace(msg.workspace, msg.token);
       if (!msg.user?.id) throw new CoordError('user is required');
       if (/^(__proto__|constructor|prototype)$/.test(String(msg.user.id))) throw new CoordError('Invalid user');
+      c.user = { id: String(msg.user.id).slice(0, 80), name: String(msg.user.name || 'Teammate').slice(0, 60) };
+      // Joining first: if the project refuses this person, no snapshot is sent for nothing.
+      w.call('userJoined', { user: c.user });
       c.workspace = w;
       clearTimeout(c.helloTimer);
-      c.user = { id: String(msg.user.id).slice(0, 80), name: String(msg.user.name || 'Teammate').slice(0, 60) };
       const since = Number(msg.since) || 0;
       const missed = since ? w.eventsSince(since, 5000) : w.events.slice(-300);
       c.ws.send(JSON.stringify({ t: 'welcome', connId: c.id, snapshot: w.call('snapshot'), events: missed, fileIndex: w.call('fileIndex') }));
-      w.call('userJoined', { user: c.user });
       this._presence(w);
     } catch (err) {
       c.ws.send(JSON.stringify({ t: 'error', error: err.message, code: err.code }));

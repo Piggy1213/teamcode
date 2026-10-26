@@ -31,6 +31,7 @@ class AgentManager extends EventEmitter {
     this.metaFile = path.join(dataDir, 'agents.json');
     try { this.meta = JSON.parse(fs.readFileSync(this.metaFile, 'utf8')); } catch { this.meta = {}; }
     this.handoffBeats = new Map();
+    this.handingOff = new Set(); // task ids mid-handoff: the run is stopping but the handoff isn't recorded yet
     for (const m of Object.values(this.meta)) if (m.handedOff) this._keepAlive(m.agentId);
   }
 
@@ -48,7 +49,8 @@ class AgentManager extends EventEmitter {
     this.handoffBeats.delete(agentId);
   }
 
-  handedOffTasks() { return new Set(Object.values(this.meta).filter((m) => m.handedOff).map((m) => m.taskId)); }
+  // Tasks continuing in Claude Code, or on their way there: never auto-started.
+  handedOffTasks() { return new Set([...Object.values(this.meta).filter((m) => m.handedOff).map((m) => m.taskId), ...this.handingOff]); }
 
   // Closing or switching projects: stop keep-alive timers (the next open resumes them from meta).
   dispose() {
@@ -320,9 +322,10 @@ class AgentManager extends EventEmitter {
         this.log(agentId, 'system', 'Stopped by user');
         // Back to the queue, but not straight back into an agent: wait for someone to start it again.
         // This comes before agentExited, which would otherwise put it back as ready with autoStart still on.
-        if (mine && task && ['running', 'blocked'].includes(task.status)) {
+        // A task the server already put back in the queue (this computer slept) is still this agent's to stop.
+        if (mine && task && ['running', 'blocked', 'ready', 'waiting'].includes(task.status)) {
           await this.conn.call('updateTask', { taskId: m.taskId, autoStart: false }).catch(() => {});
-          await this.conn.call('reopenTask', { taskId: m.taskId, agentId, autoStart: false }).catch(() => {});
+          if (['running', 'blocked'].includes(task.status)) await this.conn.call('reopenTask', { taskId: m.taskId, agentId, autoStart: false }).catch(() => {});
         }
         await this.conn.call('agentExited', { agentId, outcome: 'stopped' }).catch(() => {});
         return;
@@ -426,9 +429,15 @@ class AgentManager extends EventEmitter {
     if (!m.sessionId) throw new Error('This agent has no conversation yet. Wait until it has started, then try again.');
     if (!fs.existsSync(m.cwd)) throw new Error(`This agent's folder no longer exists (${m.cwd}).`);
     const freshTask = async () => (await this.conn.call('snapshot').catch(() => null))?.tasks?.[m.taskId] || this.getState()?.tasks?.[m.taskId];
-    let task = await freshTask();
+    const task = await freshTask();
     if (task && ['done', 'cancelled'].includes(task.status)) throw new Error('This task is already finished.');
+    // From here until the handoff is recorded (or fails) nothing may auto-start this task: stopping the
+    // run puts it back in the queue for a moment.
+    this.handingOff.add(m.taskId);
+    try { return await this._handOff(agentId, m, open, freshTask); } finally { this.handingOff.delete(m.taskId); }
+  }
 
+  async _handOff(agentId, m, open, freshTask) {
     const run = this.running.get(agentId);
     if (run?.exited) await run.done;
     else if (run) {
@@ -437,7 +446,7 @@ class AgentManager extends EventEmitter {
       await Promise.race([run.done, new Promise((r) => setTimeout(r, 10000))]);
     }
     // The run may have just finished, failed or been stopped: decide from the task as it is now.
-    task = await freshTask();
+    const task = await freshTask();
     if (task && ['done', 'cancelled'].includes(task.status)) throw new Error('This task finished before it could be handed over.');
     const theirs = task?.assignee && task.assignee !== agentId && this.getState()?.agents?.[task.assignee];
     if (theirs && ['starting', 'working', 'idle', 'waiting', 'blocked', 'stale'].includes(theirs.status)) throw new Error(`${theirs.name} is working on this task now.`);

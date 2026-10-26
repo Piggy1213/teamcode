@@ -364,9 +364,9 @@ test('records have a hard ceiling: updates stop there, while sync of existing fi
   assert.match(refused?.message || '', /storage limit/, 'growing existing records stops at the ceiling');
   assert.ok(W.metaBytes < 400 * 1024 * 0.75, `records stay well under the whole budget (${W.metaBytes})`);
   // While over the ceiling: nothing new, but everything that only touches what exists still works.
-  assert.throws(() => W.call('userJoined', { user: { id: 'u9', name: 'New' } }, { user: { id: 'u9', name: 'New' } }), /storage limit/);
   assert.throws(() => W.call('filePut', { path: 'new.js', baseVersion: 0, contentB64: b64('x') }, user), /storage limit/);
   assert.throws(() => W.call('preEdit', { agentId: 'agt_h', path: 'new.js' }, user), /storage limit/);
+  W.call('userJoined', { user: { id: 'u9', name: 'New' } }, { user: { id: 'u9', name: 'New' } }); // joining is never refused for space
   W.call('userJoined', { user: { id: 'u1', name: 'Uma' } }, user);
   W.call('filePut', { path: 'keep.js', baseVersion: 1, contentB64: b64('v2') }, user);
   W.call('fileEdited', { agentId: 'agt_h', path: 'keep.js', hash: sha('v2') }, user);
@@ -510,4 +510,198 @@ test('Revert skips files whose old version is gone for good, and still records t
   const r2 = await ProjectSession.prototype.revert.call(fake, 't1');
   assert.equal(r2.ok, false, 'a temporary failure can be retried');
   assert.ok(!calls.includes('again:markReverted'));
+});
+
+// ---- round 7 ----
+const startOn = (W, agentId, taskId, extra = {}) => { W.call('registerAgent', { agentId, name: agentId, ...extra }, user); W.call('startTask', { taskId, agentId }, user); };
+
+test('a new Claude Code session (new session id) never inherits the old session\'s task, even within minutes', () => {
+  const c = new Coordinator({ dataDir: tmp() });
+  const W = c.ensureWorkspace('sess-ws', { name: 'S' });
+  const t = W.call('createTask', { title: 'Job' }, user);
+  startOn(W, 'agt_cc_s', t.id, { session: 's1' });
+  W.call('registerAgent', { agentId: 'agt_cc_s', name: 'agt_cc_s', session: 's1' }, user); // same process again: keeps it
+  assert.equal(W.state.agents.agt_cc_s.taskId, t.id);
+  W.state.agents.agt_cc_s.lastSeen = Date.now() - 2 * 60 * 1000; W.sweep(); // stale, not yet offline
+  W.call('registerAgent', { agentId: 'agt_cc_s', name: 'agt_cc_s', session: 's2' }, user); // new session
+  assert.equal(W.state.tasks[t.id].status, 'ready');
+  assert.equal(W.state.agents.agt_cc_s.taskId, null);
+  W.call('registerAgent', { agentId: 'agt_bo', name: 'Bo' }, user);
+  W.call('startTask', { taskId: t.id, agentId: 'agt_bo' }, user); // a teammate can take it
+  // Reopened within seconds (agent still active): also a new session.
+  const t2 = W.call('createTask', { title: 'Job 2' }, user);
+  W.call('startTask', { taskId: t2.id, agentId: 'agt_cc_s' }, user);
+  W.call('registerAgent', { agentId: 'agt_cc_s', name: 'agt_cc_s', session: 's3' }, user);
+  assert.equal(W.state.tasks[t2.id].status, 'ready');
+  c.close();
+});
+
+test('hook calls before the new session registers cannot resume a fixed-id client\'s old task', () => {
+  const c = new Coordinator({ dataDir: tmp() });
+  const W = c.ensureWorkspace('hookfirst-ws', { name: 'H' });
+  const t = W.call('createTask', { title: 'Job' }, user);
+  startOn(W, 'agt_cc_h', t.id, { session: 's1' });
+  goOffline(W, 'agt_cc_h');
+  assert.equal(W.state.tasks[t.id].releasedFrom, undefined, 'a fixed-id client is never marked to resume');
+  W.call('getContext', { agentId: 'agt_cc_h' }, user); // SessionStart hook first
+  W.call('pullDigest', { agentId: 'agt_cc_h' }, user);
+  assert.equal(W.state.tasks[t.id].status, 'ready');
+  W.call('registerAgent', { agentId: 'agt_cc_h', name: 'agt_cc_h', session: 's2' }, user);
+  W.call('heartbeat', { agentId: 'agt_cc_h' }, user);
+  assert.equal(W.state.tasks[t.id].status, 'ready');
+  assert.equal(W.state.agents.agt_cc_h.taskId, null);
+  c.close();
+});
+
+test('a released blocked task whose blocker was resolved meanwhile resumes as running', () => {
+  const c = new Coordinator({ dataDir: tmp() });
+  const W = c.ensureWorkspace('unblk-ws', { name: 'U' });
+  const t = W.call('createTask', { title: 'Job' }, user);
+  startOn(W, 'agt_ub', t.id, { taskId: t.id });
+  const b = W.call('reportBlocker', { agentId: 'agt_ub', description: 'need the API' }, user);
+  goOffline(W, 'agt_ub');
+  W.call('resolveBlocker', { blockerId: b.id, resolution: 'API is up' }, user);
+  W.call('heartbeat', { agentId: 'agt_ub' }, user);
+  assert.equal(W.state.tasks[t.id].status, 'running');
+  assert.equal(W.state.agents.agt_ub.status, 'working');
+  c.close();
+});
+
+test('someone else\'s edit stays visible to Revert after history trimming drops it', () => {
+  const c = new Coordinator({ dataDir: tmp() });
+  const W = c.ensureWorkspace('others-ws', { name: 'O' });
+  const bo = { user: { id: 'u2', name: 'Bo' } };
+  W.call('filePut', { path: 'a.js', baseVersion: 0, contentB64: b64('original') }, user);
+  const t = W.call('createTask', { title: 'Edit a', mode: 'shared' }, user);
+  startOn(W, 'agt_o', t.id, { taskId: t.id });
+  const edit = (text) => { W.call('fileEdited', { agentId: 'agt_o', path: 'a.js', hash: sha(text) }, user); W.call('filePut', { path: 'a.js', baseVersion: W.state.files['a.js'].version, contentB64: b64(text) }, user); };
+  edit('agent 1');
+  W.call('filePut', { path: 'a.js', baseVersion: W.state.files['a.js'].version, contentB64: b64('bo was here') }, bo);
+  for (let i = 0; i < 35; i++) edit(`agent ${i + 2}`);
+  assert.ok(!W.state.files['a.js'].history.some((h) => h.by.name === 'Bo'), 'Bo\'s version left history');
+  assert.deepEqual(W.call('taskChanges', { taskId: t.id }, user)[0].changedByOthersSince, ['Bo']);
+  c.close();
+});
+
+test('the agent\'s own synced edit is not mistaken for someone else\'s on a later edit', () => {
+  const c = new Coordinator({ dataDir: tmp() });
+  const W = c.ensureWorkspace('own-ws', { name: 'O' });
+  W.call('filePut', { path: 'a.js', baseVersion: 0, contentB64: b64('original') }, user);
+  const t = W.call('createTask', { title: 'Edit a', mode: 'shared' }, user);
+  startOn(W, 'agt_own', t.id, { taskId: t.id });
+  W.call('fileEdited', { agentId: 'agt_own', path: 'a.js', hash: sha('one') }, user);
+  W.call('filePut', { path: 'a.js', baseVersion: 1, contentB64: b64('one') }, user);
+  W.call('filePut', { path: 'a.js', baseVersion: 2, contentB64: b64('two') }, user); // sync first this time
+  W.call('fileEdited', { agentId: 'agt_own', path: 'a.js', hash: sha('two') }, user);
+  assert.deepEqual(W.call('taskChanges', { taskId: t.id }, user)[0].changedByOthersSince, []);
+  c.close();
+});
+
+test('a change record from before others were remembered treats trimmed history as possibly someone else\'s', () => {
+  const c = new Coordinator({ dataDir: tmp() });
+  const W = c.ensureWorkspace('legacy-ws', { name: 'L' });
+  W.call('filePut', { path: 'a.js', baseVersion: 0, contentB64: b64('original') }, user);
+  const t = W.call('createTask', { title: 'Old', mode: 'shared' }, user);
+  startOn(W, 'agt_l', t.id, { taskId: t.id });
+  W.call('fileEdited', { agentId: 'agt_l', path: 'a.js', hash: sha('x') }, user);
+  delete W.state.tasks[t.id].changes['a.js'].others; // as saved by an older server
+  for (let i = 0; i < 40; i++) W.call('filePut', { path: 'a.js', baseVersion: W.state.files['a.js'].version, contentB64: b64(`v${i}`) }, user);
+  assert.ok(W.call('taskChanges', { taskId: t.id }, user)[0].changedByOthersSince.some((n) => /trimmed/.test(n)));
+  c.close();
+});
+
+test('caller-sized text is clipped and hashes validated, so allowed operations cannot store huge values', () => {
+  const c = new Coordinator({ dataDir: tmp() });
+  const W = c.ensureWorkspace('clip-ws', { name: 'C' });
+  W.call('filePut', { path: 'a.js', baseVersion: 0, contentB64: b64('x') }, user);
+  const t = W.call('createTask', { title: 'T' }, user);
+  startOn(W, 'agt_c', t.id, { taskId: t.id });
+  W.call('agentRead', { agentId: 'agt_c', path: 'a.js', hash: 'h'.repeat(60000) }, user);
+  assert.equal(W.state.agents.agt_c.reads['a.js'].hash, null);
+  W.call('announceEdit', { agentId: 'agt_c', paths: ['a.js'], intent: 'i'.repeat(60000) }, user);
+  assert.ok(W.state.reservations['a.js'].agt_c.intent.length <= 500);
+  W.call('requestReview', { agentId: 'agt_c', taskId: t.id, summary: 's'.repeat(60000), stats: { files: 2, junk: 'j'.repeat(60000) } }, user);
+  assert.ok(W.state.tasks[t.id].review.summary.length <= 4000);
+  assert.deepEqual(W.state.tasks[t.id].review.stats, { files: 2, insertions: 0, deletions: 0 });
+  W.call('integrationChecked', { taskId: t.id, conflicts: ['c'.repeat(60000)], risks: [{ kind: 'k', message: 'm'.repeat(60000) }] }, user);
+  assert.ok(JSON.stringify(W.state.tasks[t.id].integration).length < 5000);
+  assert.throws(() => W.call('resolveConflict', { conflictId: 'nope', resolution: 'x' }, user));
+  c.close();
+});
+
+test('repeated conflicts reuse their records: merge checks, retried stale writes, and overlap notices', () => {
+  const c = new Coordinator({ dataDir: tmp() });
+  const W = c.ensureWorkspace('reuse-ws', { name: 'R' });
+  const t = W.call('createTask', { title: 'Branch', mode: 'isolated' }, user);
+  for (let i = 0; i < 5; i++) {
+    W.call('integrationChecked', { taskId: t.id, conflicts: ['a.js'] }, user);
+    W.call('integrationChecked', { taskId: t.id, conflicts: [] }, user);
+  }
+  W.call('integrationChecked', { taskId: t.id, conflicts: ['a.js'] }, user);
+  const merges = Object.values(W.state.conflicts).filter((x) => x.kind === 'merge');
+  assert.equal(merges.length, 1);
+  assert.equal(merges[0].status, 'open');
+  W.call('filePut', { path: 'x.js', baseVersion: 0, contentB64: b64('v1') }, user);
+  W.call('filePut', { path: 'x.js', baseVersion: 1, contentB64: b64('v2') }, user);
+  const bo = { user: { id: 'u2', name: 'Bo' } };
+  const r1 = W.call('filePut', { path: 'x.js', baseVersion: 1, contentB64: b64('stale') }, bo);
+  const r2 = W.call('filePut', { path: 'x.js', baseVersion: 1, contentB64: b64('stale') }, bo);
+  assert.equal(r1.conflict, r2.conflict, 'a retried stale write reuses its conflict');
+  W.call('filePut', { path: 'o.js', baseVersion: 0, contentB64: b64('o') }, user);
+  W.call('registerAgent', { agentId: 'agt_1', name: 'One' }, user);
+  W.call('registerAgent', { agentId: 'agt_2', name: 'Two' }, user);
+  W.call('announceEdit', { agentId: 'agt_1', paths: ['o.js'] }, user);
+  for (let i = 0; i < 3; i++) { W.overlapKeys.clear(); W.call('announceEdit', { agentId: 'agt_2', paths: ['o.js'] }, user); }
+  const notices = () => Object.values(W.state.conflicts).filter((x) => x.kind === 'overlap');
+  assert.equal(notices().length, 1);
+  notices()[0].at -= 2 * 24 * 3600 * 1000;
+  W._prunedAt = 0; W.sweep();
+  assert.equal(notices().length, 0, 'old overlap notices are pruned');
+  c.close();
+});
+
+test('people can still join a project at the storage ceiling; a project caps how many people it remembers', async () => {
+  const c = new Coordinator({ dataDir: tmp(), limits: { maxBytes: 200 * 1024 } });
+  const W = c.ensureWorkspace('join-ws', { name: 'J' });
+  W.metaBytes = 150 * 1024; // over the ceiling
+  W.call('userJoined', { user: { id: 'u_new', name: 'New' } }, user);
+  for (let i = Object.keys(W.state.users).length; i < 500; i++) W.state.users[`u${i}x`] = { id: `u${i}x`, name: 'x' };
+  assert.throws(() => W.call('userJoined', { user: { id: 'u_501', name: 'Late' } }, user), (e) => e.code === 'full');
+  // Over WebSocket the refusal comes before any snapshot, and the desktop stops retrying.
+  const { TeamServer } = require('../../server/server');
+  const WebSocket = require('ws');
+  const server = new TeamServer({ dataDir: tmp() });
+  const port = await server.listen(0, '127.0.0.1');
+  const SW = server.coordinator.ensureWorkspace('full-ppl', { name: 'F', token: 'tok' });
+  for (let i = 0; i < 500; i++) SW.state.users[`p${i}`] = { id: `p${i}`, name: 'x' };
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+  const msgs = [];
+  await new Promise((resolve) => {
+    ws.on('open', () => ws.send(JSON.stringify({ t: 'hello', workspace: 'full-ppl', token: 'tok', user: { id: 'stranger', name: 'S' } })));
+    ws.on('message', (m) => msgs.push(JSON.parse(m.toString()).t));
+    ws.on('close', resolve);
+  });
+  assert.deepEqual(msgs, ['error']);
+  await server.close?.();
+  c.close();
+});
+
+test('Stop on a task the server already put back in the queue turns off auto-start; a handoff in progress blocks auto-start', async () => {
+  const { AgentManager } = require('../../src/main/agents');
+  const calls = [];
+  const fake = {
+    meta: { agt_s: { taskId: 't1' } },
+    running: new Map(),
+    conn: { call: async (op, args) => { calls.push([op, args]); return op === 'snapshot' ? { tasks: { t1: { id: 't1', status: 'ready', assignee: 'agt_s', autoStart: true } } } : {}; } },
+    getState: () => null, log: () => {}, emit: () => {},
+  };
+  const run = { stopping: true, handoff: false };
+  await AgentManager.prototype._onExit.call(fake, 'agt_s', run, 0, '');
+  const ops = calls.map(([op]) => op);
+  assert.deepEqual(calls.find(([op]) => op === 'updateTask')[1], { taskId: 't1', autoStart: false });
+  assert.ok(!ops.includes('reopenTask'), 'already in the queue: nothing to reopen');
+  assert.equal(ops.at(-1), 'agentExited', 'reported gone only after auto-start is off');
+  const mgr = Object.create(AgentManager.prototype);
+  Object.assign(mgr, { meta: {}, handingOff: new Set(['t9']) });
+  assert.ok(mgr.handedOffTasks().has('t9'));
 });
