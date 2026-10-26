@@ -487,6 +487,8 @@ class Workspace extends EventEmitter {
   op_startTask({ taskId, agentId, branch, worktree, baseCommit, force }, ctx) {
     const t = this._task(taskId);
     if (t.status === 'running') throw new CoordError('Task is already running');
+    // Restarting a failed, finished or cancelled task is a deliberate choice (Retry / Reopen), never automatic.
+    if (['failed', 'done', 'cancelled'].includes(t.status) && !force) throw new CoordError(`Task is ${t.status}. Start it again from the board.`, 'not_ready');
     if (t.status === 'waiting' && !force) {
       const pending = t.dependsOn.map((d) => this.state.tasks[d]).filter((d) => d && !this._depSatisfied(d, t)).map((d) => (d.status === 'done' ? `${d.title} (needs merge)` : d.title));
       throw new CoordError(`Task is waiting on: ${pending.join(', ')}`, 'waiting');
@@ -1095,7 +1097,8 @@ class Workspace extends EventEmitter {
       this.claims.delete(p);
     }
 
-    if (baseVersion === curVersion) {
+    // No server record of the file (new file, or the server's data was reset): nothing to merge against.
+    if (baseVersion === curVersion || !cur) {
       const f = this._applyFile(p, buf, deleted, actor, { origin });
       if (!claimed) this.emitEvent(deleted ? 'file.deleted' : 'file.changed', actor, { task: actor.agent?.taskId, files: [p], branch: 'main', version: f.version, data: { hash } });
       return { ok: true, version: f.version, hash };

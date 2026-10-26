@@ -114,8 +114,10 @@ function renderNow() {
 
 function claudeBanner() {
   const c = S.init.claude;
+  const install = window.tc.platform === 'win32' ? 'irm https://claude.ai/install.ps1 | iex' : 'curl -fsSL https://claude.ai/install.sh | bash';
+  if (!c.path) return `<div class="banner warn">${icon('warn')}<div class="spacer"><b>Claude Code not found.</b> <span class="muted">Install it with <code>${install}</code>, then press Detect.</span></div><button class="btn sm" data-act="detect-claude">Detect</button><button class="btn sm" data-act="browse-claude">Locate…</button></div>`;
+  if (!c.version) return `<div class="banner err">${icon('warn')}<div class="spacer"><b>Claude Code isn't responding.</b> <span class="muted">TeamCode can't run <code>${esc(c.path)}</code>. Press Detect, or install it with <code>${install}</code>.</span></div><button class="btn sm" data-act="detect-claude">Detect</button><button class="btn sm" data-act="browse-claude">Locate…</button></div>`;
   if (S.needsLogin || c.loggedIn === false) return `<div class="banner warn">${icon('key')}<div class="spacer"><b>Sign in to Claude Code.</b> <span class="muted">Agents can't run until you do.</span></div><button class="btn primary sm" data-act="login">Sign in</button></div>`;
-  if (!c.path) return `<div class="banner warn">${icon('warn')}<div class="spacer"><b>Claude Code not found.</b> <span class="muted">Install it with <code>npm i -g @anthropic-ai/claude-code</code> or point TeamCode at it.</span></div><button class="btn sm" data-act="detect-claude">Detect again</button><button class="btn sm" data-act="browse-claude">Locate…</button></div>`;
   return `<div class="banner ok">${icon('check')}<div class="spacer"><b>Claude Code ready</b> <span class="muted mono">${esc(c.version || '')}</span></div><button class="btn sm ghost" data-act="login">Switch account</button></div>`;
 }
 
@@ -227,7 +229,7 @@ function shell() {
         <button class="btn" data-act="plan-modal" title="Let Claude split a feature into parallel tasks (${MOD}+P)">${icon('plan')}Plan a feature</button>
         <button class="btn primary" data-act="task-modal" title="${MOD}+N">${icon('plus')}New task</button>
       </div>
-      ${S.needsLogin || !S.init.claude.path || S.init.claude.loggedIn === false ? `<div style="padding:16px 24px 0">${claudeBanner()}</div>` : ''}
+      ${S.needsLogin || !S.init.claude.path || !S.init.claude.version || S.init.claude.loggedIn === false ? `<div style="padding:16px 24px 0">${claudeBanner()}</div>` : ''}
       ${S.state ? VIEW_RENDER[S.view]() : `<div class="view"><div class="empty"><span class="spinner"></span><div>${S.status === 'offline' ? 'Reconnecting to the team workspace…' : 'Connecting to the team workspace…'}</div></div></div>`}
     </section>
   </div>`;
@@ -250,7 +252,7 @@ function agentCard(a) {
         <div class="tiny faint ellipsis">${esc(a.client)}${owner ? `, ${esc(owner)}'s computer` : ''}${rt?.costUsd ? `, <span class="num" title="Claude usage cost">$${rt.costUsd.toFixed(2)}</span>` : ''}</div></div>
       </div>
       ${t ? `<div class="task-line" title="${esc(t.title)}">${esc(t.title)}</div>
-        <div class="meta-line">${taskPill(t.status)}${a.mode === 'isolated' ? `<span class="mono" title="Branch">${icon('branch')}${esc(a.branch)}</span>` : `<span>${icon('folder')}shared copy</span>`}${t.review?.state === 'pending' ? '<span class="tag blue">Awaiting review</span>' : ''}${t.integration?.state === 'merged' ? '<span class="tag green">Merged</span>' : ''}</div>` : '<span class="muted">No task assigned</span>'}
+        <div class="meta-line">${taskPill(t.status)}${rt?.handedOff ? `<span class="tag">${icon('terminal')}In Claude Code</span>` : ''}${a.mode === 'isolated' ? `<span class="mono" title="Branch">${icon('branch')}${esc(a.branch)}</span>` : `<span>${icon('folder')}shared copy</span>`}${t.review?.state === 'pending' ? '<span class="tag blue">Awaiting review</span>' : ''}${t.integration?.state === 'merged' ? '<span class="tag green">Merged</span>' : ''}</div>` : '<span class="muted">No task assigned</span>'}
       ${a.detail && !['working'].includes(a.status) ? `<div class="small muted">${esc(a.detail)}</div>` : ''}
     </div>
     ${files.length || updates.length || errors.length || conflicts.length || waiting.length ? `<div class="sec">
@@ -263,7 +265,7 @@ function agentCard(a) {
     <div class="foot">
       <span class="tiny faint" title="${a.pendingEvents ? 'Relevant team updates not yet delivered to this agent' : 'All relevant updates delivered'}">${a.pendingEvents ? `${icon('inbox')} ${a.pendingEvents} pending` : 'Up to date'}, seen ${ago(a.lastSeen)}</span>
       <span class="spacer"></span>
-      ${rt ? `<button class="btn sm ghost" data-act="agent-msg" data-id="${a.id}">${icon('message')}Message</button><button class="btn sm" data-act="agent-log" data-id="${a.id}">${icon('terminal')}Log</button>` : `<button class="btn sm" data-act="agent-detail" data-id="${a.id}">Details</button>`}
+      ${rt?.handedOff ? `<button class="btn sm primary" data-act="agent-finish" data-id="${a.id}">${icon('review')}Send for review</button>` : rt ? `<button class="btn sm ghost" data-act="agent-msg" data-id="${a.id}">${icon('message')}Message</button><button class="btn sm" data-act="agent-log" data-id="${a.id}">${icon('terminal')}Chat</button>` : `<button class="btn sm" data-act="agent-detail" data-id="${a.id}">Details</button>`}
       ${rt?.running ? `<button class="icon-btn" data-act="agent-stop" data-id="${a.id}" title="Stop agent" style="color:var(--red)">${icon('stop')}</button>` : ''}
     </div>
   </div>`;
@@ -619,9 +621,11 @@ function renderDrawer() {
     const a = S.state.agents[d.id];
     const rt = S.runtime[d.id];
     const log = S.logs[d.id] || [];
-    html = `<div class="drawer"><div class="modal-head">${avatar(a?.name || '?')}<div class="spacer"><b>${esc(a?.name || 'Agent')}</b><div class="tiny muted">${esc(a?.task?.title || '')}</div></div>${a ? statusPill(a.status) : ''}${rt?.running ? `<button class="btn sm danger" data-act="agent-stop" data-id="${d.id}">${icon('stop')}Stop</button>` : ''}<button class="icon-btn" data-act="drawer-close" title="Close">${icon('x')}</button></div>
-      <div class="drawer-body" id="log-scroll"><div class="log">${log.map((e) => `<div class="e ${e.kind}">${esc(e.text)}</div>`).join('') || '<div class="muted small">No output yet.</div>'}</div></div>
-      ${rt ? `<div class="chatbar"><input id="agent-msg-input" placeholder="${rt.running ? 'Message this agent. It reads it after its current step.' : 'Ask a follow-up. Resumes the same session.'}"><button class="btn primary" data-act="agent-send" data-id="${d.id}">Send</button></div>` : ''}</div>`;
+    const canHandOff = rt && rt.sessionId && !rt.handedOff && window.tc.platform !== 'linux';
+    html = `<div class="drawer"><div class="modal-head">${avatar(a?.name || '?')}<div class="spacer"><b>${esc(a?.name || 'Agent')}</b><div class="tiny muted">${esc(a?.task?.title || '')}</div></div>${a ? statusPill(a.status) : ''}${canHandOff ? `<button class="btn sm" data-act="agent-open-cc" data-id="${d.id}" title="Continue this conversation in a Claude Code window">${icon('terminal')}Open in Claude Code</button>` : ''}${rt?.running ? `<button class="btn sm danger" data-act="agent-stop" data-id="${d.id}">${icon('stop')}Stop</button>` : ''}<button class="icon-btn" data-act="drawer-close" title="Close">${icon('x')}</button></div>
+      ${rt?.handedOff ? `<div class="banner" style="margin:12px 18px 0">${icon('terminal')}<div class="spacer small">This agent is continuing in a Claude Code window. When it's done, send its work for review.</div><button class="btn sm primary" data-act="agent-finish" data-id="${d.id}">Send for review</button></div>` : ''}
+      <div class="drawer-body" id="log-scroll"><div class="log">${log.map((e) => `<div class="e ${e.kind}">${esc(e.text)}</div>`).join('') || '<div class="muted small">Starting…</div>'}</div></div>
+      ${rt && !rt.handedOff ? `<div class="chatbar"><input id="agent-msg-input" placeholder="${rt.running ? 'Message this agent. It reads it after its current step.' : 'Ask a follow-up. Resumes the same session.'}"><button class="btn primary" data-act="agent-send" data-id="${d.id}">Send</button></div>` : ''}</div>`;
   } else if (d.kind === 'task') {
     const t = S.state.tasks[d.id];
     if (!t) { S.drawer = null; root.innerHTML = ''; return; }
@@ -832,7 +836,7 @@ A['task-start'] = async (d) => {
   if (t.status === 'waiting' && !confirm('This task is still waiting on dependencies. Start it anyway?')) return;
   if (t.status === 'waiting') await run(() => call('updateTask', { taskId: d.id, dependsOn: [] }));
   const r = await run(() => api('agent:start', { taskId: d.id }));
-  if (r) { toast(`${r.name} is on it`, 'ok'); S.drawer = { kind: 'agent', id: r.agentId }; S.logs[r.agentId] = await api('agent:log', { agentId: r.agentId }); render(); }
+  if (r) toast(`${r.name} is on it`, 'ok');
 };
 A['start-all-ready'] = async () => {
   for (const t of tasks().filter((x) => x.status === 'ready' && (!x.runner || x.runner === me().id))) await run(() => api('agent:start', { taskId: t.id }));
@@ -879,6 +883,12 @@ A['agent-detail'] = (d) => {
   const a = S.state.agents[d.id];
   if (a?.task) { S.drawer = { kind: 'task', id: a.task.id }; renderDrawer(); } else toast(`${a?.name} runs on another computer`, 'info');
 };
+A['agent-open-cc'] = async (d) => {
+  const rt = S.runtime[d.id];
+  if (rt?.running && !confirm('Continue this agent in a Claude Code window? Its background run stops and the same conversation opens there, with the same team tools.')) return;
+  if (await run(() => api('agent:openInClaudeCode', { agentId: d.id }))) toast('Opened in Claude Code', 'ok');
+};
+A['agent-finish'] = (d) => run(() => api('agent:finishHandoff', { agentId: d.id }), 'Sent for review');
 A['agent-msg'] = (d) => A['agent-log'](d).then(() => $('#agent-msg-input')?.focus());
 A['agent-stop'] = (d) => { if (confirm('Stop this agent? Its task returns to the queue.')) run(() => api('agent:stop', { agentId: d.id }), 'Stopping agent'); };
 A['agent-send'] = async (d) => {
@@ -1065,6 +1075,13 @@ window.tc.on('tc:runtime', (r) => { S.runtime = r; render(); });
 window.tc.on('tc:toast', (t) => toast(t.text, t.kind));
 window.tc.on('tc:needsLogin', () => { S.needsLogin = true; render(); });
 window.tc.on('tc:update', (u) => { S.update = u; render(); });
+// An agent started on this computer (by hand or automatically): open its chat unless something else is open.
+window.tc.on('tc:agentStarted', async ({ agentId }) => {
+  if ($('#modal-root').innerHTML || (S.drawer && S.drawer.kind !== 'agent')) return;
+  S.drawer = { kind: 'agent', id: agentId };
+  S.logs[agentId] = await api('agent:log', { agentId }).catch(() => []);
+  renderDrawer();
+});
 window.tc.on('tc:account', (a) => {
   const signedIn = !S.account?.user && a.user;
   S.account = a;

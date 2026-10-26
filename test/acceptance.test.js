@@ -448,3 +448,51 @@ test('agent runner: launches Claude Code with hooks + MCP, publishes the agent\'
   delete process.env.FAKE_CLAUDE_FILE;
   await session.stop();
 });
+
+// ---------- broken Claude Code setups must fail once, not loop ----------
+function runnerSession(name, claudePath, toasts) {
+  const W = server.coordinator.ensureWorkspace(`accept-${name}-ws`, { name });
+  const session = new ProjectSession({
+    project: { root: tmp(name), name, role: 'host', url, workspace: W.id, token: W.token },
+    user: { id: `usr_${name}`, name }, getSettings: () => ({ claudePath, autoRun: true, maxParallel: 3, permissionMode: 'acceptEdits' }),
+    send: (ch, p) => { if (ch === 'tc:toast') toasts.push(p.text); }, dataDir: tmp(`${name}data`), scripts: { hook: HOOK, mcp: MCP }, notify: () => {},
+  });
+  return { W, session };
+}
+
+test('a Claude Code path that cannot run pauses auto-start with one message and starts no agents', async () => {
+  const toasts = [];
+  const notAProgram = tmp('Claude.app'); // a folder, like picking the desktop app bundle
+  const { W, session } = runnerSession('badpath', notAProgram, toasts);
+  await session.start();
+  await waitFor(() => session.state, { label: 'snapshot' });
+  for (let i = 0; i < 3; i++) await session.call('createTask', { title: `Task ${i}`, mode: 'shared', runner: 'usr_badpath', runnerName: 'B', autoStart: true });
+  await waitFor(() => toasts.length > 0, { label: 'setup message' });
+  await new Promise((r) => setTimeout(r, 1500));
+  assert.equal(Object.keys(W.state.agents).length, 0, 'no agent was registered');
+  assert.ok(Object.values(W.state.tasks).every((t) => t.status === 'ready'), 'tasks are left untouched');
+  assert.equal(toasts.length, 1, `one message, got: ${toasts.join(' | ')}`);
+  assert.match(toasts[0], /Agents paused/);
+  await session.stop();
+});
+
+test('a Claude Code that crashes on launch fails the task once instead of restarting it', async () => {
+  const toasts = [];
+  const crash = path.join(tmp('crashbin'), process.platform === 'win32' ? 'claude.cmd' : 'claude');
+  if (process.platform === 'win32') fs.writeFileSync(crash, '@echo off\r\nif "%1"=="--version" (echo 9.9.9 (Claude Code) & exit /b 0)\r\necho boom 1>&2\r\nexit /b 3\r\n');
+  else { fs.writeFileSync(crash, '#!/bin/sh\n[ "$1" = "--version" ] && { echo "9.9.9 (Claude Code)"; exit 0; }\necho boom >&2\nexit 3\n'); fs.chmodSync(crash, 0o755); }
+  const { W, session } = runnerSession('crash', crash, toasts);
+  await session.start();
+  await waitFor(() => session.state, { label: 'snapshot' });
+  const t = await session.call('createTask', { title: 'Crashy', mode: 'shared', runner: 'usr_crash', runnerName: 'C', autoStart: true });
+  await waitFor(() => W.state.tasks[t.id].status === 'failed', { label: 'task failed' });
+  await new Promise((r) => setTimeout(r, 2500));
+  const started = W.events.filter((e) => e.type === 'task.started' && e.task === t.id).length;
+  assert.equal(started, 1, 'started exactly once');
+  assert.equal(W.state.tasks[t.id].status, 'failed');
+  assert.match(W.state.tasks[t.id].error, /boom/);
+  // A person can still retry it on purpose.
+  await assert.rejects(() => session.call('startTask', { taskId: t.id }), /failed/);
+  await session.stop();
+});
+

@@ -9,7 +9,7 @@ const https = require('https');
 const { TeamServer } = require('../../server/server');
 const { encodeInvite, decodeInvite } = require('../../server/invite');
 const { ProjectSession } = require('./session');
-const { findClaude, claudeVersion, claudeAuthStatus, loginScript, findNode } = require('./claude-cli');
+const { findClaude, claudeVersion, claudeAuthStatus, loginScript, findNode, isRunnable, isDesktopApp, resolveClaudePath } = require('./claude-cli');
 const git = require('./git');
 const { Updater } = require('./updater');
 const { Account } = require('./account');
@@ -117,13 +117,18 @@ function requireSession() {
 async function claudeInfo(p) {
   if (!p) return { path: null, version: null, loggedIn: null };
   const [version, auth] = await Promise.all([claudeVersion(p), claudeAuthStatus(p)]);
-  return { path: p, version, loggedIn: auth ? !!auth.loggedIn : null, account: auth?.email || null };
+  return { path: p, version, works: !!version, loggedIn: auth ? !!auth.loggedIn : null, account: auth?.email || null };
 }
+
+// Claude Code settings changed: let the open project try starting agents again.
+function claudeChanged() { session?.resumeAuto(); }
 
 // ---------- IPC ----------
 const handlers = {
   'app:init': async () => {
-    if (!config.settings.claudePath || !fs.existsSync(config.settings.claudePath)) {
+    // Repair a missing or unusable path (for example the Claude desktop app picked by mistake).
+    const cp = config.settings.claudePath;
+    if (!cp || !isRunnable(cp) || isDesktopApp(cp)) {
       config.settings.claudePath = findClaude(null) || '';
       saveConfig();
     }
@@ -144,20 +149,26 @@ const handlers = {
     config.settings.maxParallel = Math.max(1, Math.min(10, Number(config.settings.maxParallel) || 3));
     saveConfig();
     if (session && 'autoRun' in s) session._autoRun();
+    if ('claudePath' in s) claudeChanged();
     return config.settings;
   },
   'app:detectClaude': async () => {
     const p = findClaude(null);
-    if (p) { config.settings.claudePath = p; saveConfig(); }
+    if (p) { config.settings.claudePath = p; saveConfig(); claudeChanged(); }
     return claudeInfo(p);
   },
   'app:claudeStatus': () => claudeInfo(config.settings.claudePath),
   'app:browseClaude': async () => {
-    const r = await dialog.showOpenDialog(win, { title: 'Locate the Claude Code CLI', properties: ['openFile'] });
+    const r = await dialog.showOpenDialog(win, { title: 'Locate the Claude Code CLI (the "claude" program)', properties: ['openFile'] });
     if (r.canceled) return null;
-    config.settings.claudePath = r.filePaths[0];
+    const picked = resolveClaudePath(r.filePaths[0]);
+    if (picked.error) throw new Error(picked.error);
+    const version = await claudeVersion(picked.path);
+    if (!version || !/claude code|^\d+\.\d+\.\d+/i.test(version)) throw new Error(`${picked.path} didn't respond like Claude Code.`);
+    config.settings.claudePath = picked.path;
     saveConfig();
-    return claudeInfo(r.filePaths[0]);
+    claudeChanged();
+    return claudeInfo(picked.path);
   },
   'app:loginClaude': async () => {
     if (!config.settings.claudePath) throw new Error('Claude Code was not found');
@@ -240,7 +251,14 @@ const handlers = {
   'ws:call': ({ op, args }) => requireSession().call(op, args || {}),
   'ws:state': () => ({ state: session?.state || null, events: session?.events || [], presence: session?.presence || [], runtime: session?.agents?.runtime() || {}, status: session?.conn?.status || 'offline', sync: session?.sync ? { ...session.sync.stats, ready: session.sync.ready, conflicts: [...session.sync.conflicts.keys()] } : null }),
 
-  'agent:start': ({ taskId }) => requireSession().startTask(taskId),
+  'agent:start': ({ taskId }) => requireSession().startTask(taskId, { manual: true }),
+  'agent:openInClaudeCode': async ({ agentId }) => {
+    const f = await requireSession().agents.openInClaudeCode(agentId);
+    const err = await shell.openPath(f);
+    if (err) throw new Error(err);
+    return true;
+  },
+  'agent:finishHandoff': ({ agentId }) => requireSession().agents.finishHandoff(agentId),
   'agent:stop': ({ agentId }) => requireSession().agents.stop(agentId),
   'agent:message': ({ agentId, text }) => requireSession().agents.message(agentId, text),
   'agent:log': ({ agentId }) => requireSession().agents.getLog(agentId),

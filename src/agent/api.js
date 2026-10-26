@@ -72,10 +72,24 @@ function register(cfg) {
   });
 }
 
+// Resolves symlinks in the longest existing prefix of `p`, so a file that doesn't exist yet still matches.
+function realish(p) {
+  let head = p, tail = '';
+  for (;;) {
+    try { return path.join(fs.realpathSync.native(head), tail); } catch { /* keep walking up */ }
+    const up = path.dirname(head);
+    if (up === head) return p;
+    tail = path.join(path.basename(head), tail);
+    head = up;
+  }
+}
+
 function relPath(cfg, file) {
   if (!file) return null;
   const abs = path.resolve(cfg.root, file);
-  const r = path.relative(cfg.root, abs);
+  let r = path.relative(cfg.root, abs);
+  // The project root and the file may be spelled through different symlinks (macOS /var -> /private/var).
+  if (!r || r.startsWith('..') || path.isAbsolute(r)) r = path.relative(realish(cfg.root), realish(abs));
   if (!r || r.startsWith('..') || path.isAbsolute(r)) return null;
   return r.split(path.sep).join('/');
 }

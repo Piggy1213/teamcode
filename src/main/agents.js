@@ -10,7 +10,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const git = require('./git');
-const { spawnSpec, shellQuote, findNode } = require('./claude-cli');
+const { spawnSpec, shellQuote, findNode, isRunnable, isDesktopApp, claudeVersion } = require('./claude-cli');
 
 const NAMES = ['Nova', 'Atlas', 'Pixel', 'Echo', 'Orbit', 'Sage', 'Blaze', 'Quill', 'Rune', 'Flux', 'Iris', 'Kite', 'Lumen', 'Mako', 'Halo', 'Cosmo', 'Dash', 'Juno', 'Vega', 'Zephyr'];
 const EDIT_TOOLS = 'Edit|Write|MultiEdit|NotebookEdit';
@@ -61,12 +61,26 @@ class AgentManager extends EventEmitter {
     return name;
   }
 
-  async startTask(taskId) {
-    const settings = this.getSettings();
-    if (!settings.claudePath) throw new Error('Claude Code was not found. Set its location in Settings.');
+  // Confirms Claude Code can actually run before any task or agent state changes, so a broken setup
+  // fails once with a clear message instead of starting (and failing) agent after agent.
+  async checkClaude() {
+    const p = this.getSettings().claudePath;
+    const fix = 'Open Settings, Claude Code, and press Detect.';
+    if (!p) throw setupError(`Claude Code wasn't found on this computer. Install it (curl -fsSL https://claude.ai/install.sh | bash), then ${fix}`);
+    if (isDesktopApp(p)) throw setupError(`TeamCode is pointed at the Claude desktop app, not Claude Code. ${fix}`);
+    if (!isRunnable(p)) throw setupError(`TeamCode can't run Claude Code at ${p}. ${fix}`);
+    if (this._verifiedClaude !== p) {
+      if (!(await claudeVersion(p))) throw setupError(`Claude Code at ${p} didn't respond. ${fix}`);
+      this._verifiedClaude = p;
+    }
+  }
+
+  // manual: started by a person (Start / Retry), which may restart a failed or finished task.
+  async startTask(taskId, { manual = false } = {}) {
+    await this.checkClaude();
     const task = this.getState()?.tasks?.[taskId];
     if (!task) throw new Error('Task not found');
-    if ([...this.running.values()].some((r) => r.taskId === taskId)) throw new Error('An agent is already running this task');
+    if ([...this.running.values()].some((r) => r.taskId === taskId && !r.exited)) throw new Error('An agent is already running this task');
 
     const agentId = 'agt_' + crypto.randomBytes(5).toString('hex');
     const name = this._pickName();
@@ -88,7 +102,12 @@ class AgentManager extends EventEmitter {
     }
 
     await this.conn.call('registerAgent', { agentId, name, client: 'Claude Code', taskId, userId: this.user.id, mode, branch, cwd });
-    await this.conn.call('startTask', { taskId, agentId, branch, worktree, baseCommit });
+    try {
+      await this.conn.call('startTask', { taskId, agentId, branch, worktree, baseCommit, force: manual && ['failed', 'done', 'cancelled'].includes(task.status) });
+    } catch (e) {
+      await this.conn.call('agentExited', { agentId, outcome: 'stopped' }).catch(() => {});
+      throw e;
+    }
     if (worktree) await this.conn.call('branchCreated', { taskId, branch, worktree, baseCommit });
     this.meta[agentId] = { agentId, name, taskId, mode, branch, worktree, baseCommit, cwd, sessionId: null, startedAt: Date.now() };
     this._saveMeta();
@@ -96,6 +115,7 @@ class AgentManager extends EventEmitter {
     const ctx = await this.conn.call('getContext', { agentId });
     this.log(agentId, 'system', `${name} starting "${task.title}" (${mode === 'isolated' ? `isolated worktree on ${branch}` : 'shared working copy'})`);
     this._spawn(agentId, this._briefing(name, task, ctx, mode, branch));
+    this.emit('started', { agentId, name, taskId });
     return { agentId, name };
   }
 
@@ -180,7 +200,8 @@ class AgentManager extends EventEmitter {
     const child = spawnCli(spec, args, {
       cwd: m.cwd, env: { ...process.env, ...env }, windowsHide: true, shell: !!spec.shell, detached: !isWin,
     });
-    const run = { child, taskId: m.taskId, pendingTurns: 0, stopping: false, lastResult: null, notLoggedIn: false };
+    const run = { child, taskId: m.taskId, pendingTurns: 0, stopping: false, handoff: false, exited: false, lastResult: null, notLoggedIn: false, spawnError: null };
+    run.done = new Promise((resolve) => { run.markDone = resolve; });
     this.running.set(agentId, run);
     this.emit('runtime');
     run.heartbeat = setInterval(() => this.conn.call('heartbeat', { agentId }).catch(() => {}), 20000);
@@ -197,14 +218,19 @@ class AgentManager extends EventEmitter {
     });
     let errBuf = '';
     child.stderr.on('data', (d) => { errBuf += d; if (errBuf.length > 20000) errBuf = errBuf.slice(-10000); });
-    child.on('error', (e) => { this.log(agentId, 'error', `Could not start Claude Code: ${e.message}`); });
-    child.on('close', (code) => this._onExit(agentId, run, code, errBuf).catch((e) => this.log(agentId, 'error', e.message)));
+    // A process that dies at once closes its stdin; without a listener that EPIPE would crash the app.
+    child.stdin.on('error', () => {});
+    child.on('error', (e) => { run.spawnError = launchError(e, spec.command); });
+    child.on('close', (code) => {
+      run.exited = true;
+      this._onExit(agentId, run, code, errBuf).catch((e) => this.log(agentId, 'error', e.message)).finally(() => run.markDone());
+    });
     this._send(agentId, prompt);
   }
 
   _send(agentId, text) {
     const run = this.running.get(agentId);
-    if (!run || !run.child.stdin.writable) return false;
+    if (!run || run.exited || !run.child.stdin.writable) return false;
     run.pendingTurns++;
     run.child.stdin.write(JSON.stringify({ type: 'user', session_id: '', parent_tool_use_id: null, message: { role: 'user', content: [{ type: 'text', text }] } }) + '\n');
     return true;
@@ -248,36 +274,53 @@ class AgentManager extends EventEmitter {
     }
   }
 
+  // Reports the outcome to the team server BEFORE the run is dropped from `running`: the scheduler runs
+  // on 'runtime', and if it ran first it could see the task as still ready and start it again.
   async _onExit(agentId, run, code, errText) {
     clearInterval(run.heartbeat);
-    this.running.delete(agentId);
-    this.emit('runtime');
     const m = this.meta[agentId];
-    const task = this.getState()?.tasks?.[m.taskId];
-    if (run.stopping) {
-      this.log(agentId, 'system', 'Stopped by user');
-      await this.conn.call('agentExited', { agentId, outcome: 'stopped' }).catch(() => {});
-      if (task && ['running', 'blocked'].includes(task.status)) await this.conn.call('reopenTask', { taskId: m.taskId }).catch(() => {});
-      return;
+    // Read the task from the server: the local snapshot can still show it as "ready" when an agent
+    // finishes quickly, which would skip completing it.
+    const fresh = await this.conn.call('snapshot').catch(() => null);
+    const task = fresh?.tasks?.[m.taskId] || this.getState()?.tasks?.[m.taskId];
+    try {
+      if (run.handoff) {
+        this.log(agentId, 'system', 'Continuing in Claude Code. Its work comes back here when you press Send for review.');
+        return;
+      }
+      if (run.stopping) {
+        this.log(agentId, 'system', 'Stopped by user');
+        await this.conn.call('agentExited', { agentId, outcome: 'stopped' }).catch(() => {});
+        // Back to the queue, but not straight back into an agent: wait for someone to start it again.
+        if (task && ['running', 'blocked'].includes(task.status)) {
+          await this.conn.call('updateTask', { taskId: m.taskId, autoStart: false }).catch(() => {});
+          await this.conn.call('reopenTask', { taskId: m.taskId }).catch(() => {});
+        }
+        return;
+      }
+      const res = run.lastResult;
+      if (run.notLoggedIn || /not logged in|\/login/i.test(errText)) {
+        this.emit('needsLogin');
+        this.log(agentId, 'error', 'Claude Code is not signed in. Use Settings, Sign in to Claude Code, then restart the task.');
+      }
+      if (res && !res.is_error && res.subtype === 'success' && !run.notLoggedIn) {
+        const summary = clip(res.result || 'Completed', 1200);
+        if (task && ['running', 'blocked'].includes(task.status)) await this.conn.call('completeTask', { agentId, taskId: m.taskId, summary });
+        await this._requestReview(agentId, m, task, summary);
+        await this.conn.call('agentExited', { agentId, outcome: 'done' });
+        this.log(agentId, 'system', 'Finished. Changes sent for review.');
+      } else {
+        const error = run.spawnError || res?.result || clip(errText.trim(), 500) || `Claude Code stopped unexpectedly (exit code ${code})`;
+        this.log(agentId, 'error', error);
+        if (run.spawnError) this._verifiedClaude = null;
+        await this.conn.call('failTask', { agentId, taskId: m.taskId, error: clip(error, 500) }).catch(() => {});
+        await this.conn.call('agentExited', { agentId, outcome: 'error', detail: clip(error, 200) }).catch(() => {});
+      }
+    } finally {
+      this.running.delete(agentId);
+      this.emit('runtime');
+      this.emit('finished', agentId);
     }
-    const res = run.lastResult;
-    if (run.notLoggedIn || /not logged in|\/login/i.test(errText)) {
-      this.emit('needsLogin');
-      this.log(agentId, 'error', 'Claude Code is not signed in. Use Settings → Sign in to Claude Code, then restart the task.');
-    }
-    if (res && !res.is_error && res.subtype === 'success' && !run.notLoggedIn) {
-      const summary = clip(res.result || 'Completed', 1200);
-      if (task && ['running', 'blocked'].includes(task.status)) await this.conn.call('completeTask', { agentId, taskId: m.taskId, summary });
-      await this._requestReview(agentId, m, task, summary);
-      await this.conn.call('agentExited', { agentId, outcome: 'done' });
-      this.log(agentId, 'system', 'Finished. Changes sent for review.');
-    } else {
-      const error = res?.result || clip(errText.trim(), 500) || `Claude Code exited with code ${code}`;
-      this.log(agentId, 'error', error);
-      await this.conn.call('failTask', { agentId, taskId: m.taskId, error: clip(error, 500) }).catch(() => {});
-      await this.conn.call('agentExited', { agentId, outcome: 'error', detail: clip(error, 200) }).catch(() => {});
-    }
-    this.emit('finished', agentId);
   }
 
   async _requestReview(agentId, m, task, summary) {
@@ -288,14 +331,22 @@ class AgentManager extends EventEmitter {
       const stats = await git.diffStat(this.root, m.baseCommit, m.branch);
       await this.conn.call('requestReview', { agentId, taskId: m.taskId, summary, files, headCommit: head, stats });
     } else {
-      const changes = await this.conn.call('taskChanges', { taskId: m.taskId });
+      // The agent's last writes may still be on their way through file sync; give them a moment.
+      let changes = [];
+      for (let i = 0; i < 8; i++) {
+        changes = await this.conn.call('taskChanges', { taskId: m.taskId });
+        if (changes.length) break;
+        await new Promise((r) => setTimeout(r, 500));
+      }
       if (!changes.length) return this.log(agentId, 'system', 'No file changes to review');
       await this.conn.call('requestReview', { agentId, taskId: m.taskId, summary });
     }
   }
 
   async message(agentId, text) {
-    if (this.running.has(agentId)) {
+    if (this.meta[agentId]?.handedOff) throw new Error('This agent is continuing in Claude Code. Message it there.');
+    const live = this.running.get(agentId);
+    if (live && !live.exited) {
       this.log(agentId, 'user', text);
       this._send(agentId, text);
       return { queued: true };
@@ -313,13 +364,58 @@ class AgentManager extends EventEmitter {
 
   stop(agentId) {
     const run = this.running.get(agentId);
-    if (!run) return false;
+    if (!run || run.exited) return false;
     run.stopping = true;
     killTree(run.child);
     return true;
   }
 
   stopAll() { for (const id of this.running.keys()) this.stop(id); }
+
+  // Hands an agent's conversation to an interactive Claude Code window (Terminal on Mac, a console on
+  // Windows). The background run stops, the same session resumes with the same team tools and hooks,
+  // and the task stays assigned to this agent until the person presses Send for review.
+  async openInClaudeCode(agentId) {
+    const m = this.meta[agentId];
+    if (!m) throw new Error('This agent was not started on this computer');
+    if (!isWin && process.platform !== 'darwin') throw new Error('Open in Claude Code works on Mac and Windows');
+    await this.checkClaude();
+    if (!m.sessionId) throw new Error('This agent has no conversation yet. Wait until it has started, then try again.');
+    const run = this.running.get(agentId);
+    if (run && !run.exited) {
+      run.handoff = true;
+      killTree(run.child);
+      await Promise.race([run.done, new Promise((r) => setTimeout(r, 10000))]);
+    }
+    m.handedOff = true;
+    this._saveMeta();
+    const settings = this.getSettings();
+    const { mcpFile, settingsFile, env } = this._files(agentId, m);
+    const args = ['--resume', m.sessionId, '--mcp-config', mcpFile, '--settings', settingsFile, '--permission-mode', settings.permissionMode || 'acceptEdits'];
+    if (settings.model) args.push('--model', settings.model);
+    const spec = spawnSpec(settings.claudePath, findNode());
+    const file = terminalScript(path.join(this.dataDir, 'scripts'), agentId, m.cwd, env, [spec.command, ...spec.prefix, ...args]);
+    this.log(agentId, 'system', 'Opened in Claude Code');
+    this.emit('runtime');
+    return file;
+  }
+
+  // The person is done with a handed-off agent: record completion and send its changes for review.
+  async finishHandoff(agentId) {
+    const m = this.meta[agentId];
+    if (!m?.handedOff) throw new Error('This agent is not in Claude Code');
+    const task = this.getState()?.tasks?.[m.taskId];
+    const summary = clip(task?.summary || 'Finished in Claude Code', 1200);
+    if (task && ['running', 'blocked'].includes(task.status)) await this.conn.call('completeTask', { agentId, taskId: m.taskId, summary });
+    await this._requestReview(agentId, m, task, summary);
+    await this.conn.call('agentExited', { agentId, outcome: 'done' }).catch(() => {});
+    m.handedOff = false;
+    m.finishedAt = Date.now();
+    this._saveMeta();
+    this.log(agentId, 'system', 'Finished in Claude Code. Changes sent for review.');
+    this.emit('runtime');
+    return true;
+  }
 
   // Orchestrator: ask Claude (read-only) to propose a dependency-aware task breakdown.
   planFeature(request) {
@@ -400,6 +496,36 @@ function describeTool(name, input = {}) {
 function spawnCli(spec, args, opts) {
   if (!spec.shell) return spawn(spec.command, [...spec.prefix, ...args], opts);
   return spawn([`"${spec.command}"`, ...shellQuote([...spec.prefix, ...args])].join(' '), [], opts);
+}
+
+function setupError(message) {
+  const e = new Error(message);
+  e.code = 'claude_setup';
+  return e;
+}
+
+// Node reports a failed launch as an errno (EACCES = permission denied, ENOENT = missing). Say what it means.
+function launchError(e, command) {
+  if (e.code === 'EACCES') return `Couldn't start Claude Code: ${command} isn't a program this computer can run. Open Settings, Claude Code, and press Detect.`;
+  if (e.code === 'ENOENT') return `Couldn't start Claude Code: ${command} doesn't exist anymore. Open Settings, Claude Code, and press Detect.`;
+  return `Couldn't start Claude Code: ${e.message}`;
+}
+
+// Writes a one-shot script that opens a terminal in `cwd` with the TeamCode env and runs `cmd`.
+// The script deletes itself when it starts, because it carries the workspace token.
+function terminalScript(dir, agentId, cwd, env, cmd) {
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  if (isWin) {
+    const f = path.join(dir, `claude-${agentId}.cmd`);
+    const sets = Object.entries(env).map(([k, v]) => `set "${k}=${String(v).replace(/"/g, '')}"`).join('\r\n');
+    fs.writeFileSync(f, `@echo off\r\ntitle TeamCode agent\r\n${sets}\r\ncd /d "${cwd}"\r\n${[`"${cmd[0]}"`, ...shellQuote(cmd.slice(1))].join(' ')}\r\n(goto) 2>nul & del "%~f0"\r\n`, { mode: 0o600 });
+    return f;
+  }
+  const sq = (v) => `'${String(v).replace(/'/g, `'\\''`)}'`;
+  const f = path.join(dir, `claude-${agentId}.command`);
+  const exports = Object.entries(env).map(([k, v]) => `export ${k}=${sq(v)}`).join('\n');
+  fs.writeFileSync(f, `#!/bin/sh\nrm -f "$0"\n${exports}\ncd ${sq(cwd)} || exit 1\nexec ${cmd.map(sq).join(' ')}\n`, { mode: 0o700 });
+  return f;
 }
 
 function killTree(child) {

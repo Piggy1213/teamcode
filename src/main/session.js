@@ -18,6 +18,11 @@ class ProjectSession {
     this.events = [];
     this.presence = [];
     this.starting = new Set();
+    // taskId -> { seq, updatedAt, failed } for the last automatic start. The task is skipped until a
+    // newer snapshot arrives (so a stale snapshot can't start it twice), and a failed start is not
+    // retried until the task itself changes. Server values only, so clock skew doesn't matter.
+    this.autoTried = new Map();
+    this.autoPaused = null; // set when Claude Code itself is broken; cleared when settings change
     const key = crypto.createHash('sha1').update(`${project.workspace}|${path.resolve(project.root).toLowerCase()}`).digest('hex').slice(0, 12);
     this.localDir = path.join(dataDir, 'projects', key);
   }
@@ -59,6 +64,7 @@ class ProjectSession {
       getSettings: this.getSettings, getState: () => this.state, scripts: this.scripts,
     });
     this.agents.on('log', (agentId, entry) => this.send('tc:agentLog', { agentId, entry }));
+    this.agents.on('started', (info) => this.send('tc:agentStarted', info));
     this.agents.on('runtime', () => { this.send('tc:runtime', this.agents.runtime()); this._autoRun(); });
     this.agents.on('needsLogin', () => this.send('tc:needsLogin'));
     this.agents.on('finished', () => this._autoRun());
@@ -95,22 +101,47 @@ class ProjectSession {
   // ---------- scheduling ----------
   async _autoRun() {
     const s = this.getSettings();
-    if (!s.autoRun || !this.state || !this.agents || this.conn.status !== 'online') return;
+    if (!s.autoRun || this.autoPaused || !this.state || !this.agents || this.conn.status !== 'online') return;
     const busy = new Set([...this.agents.running.values()].map((r) => r.taskId));
     let slots = (s.maxParallel || 3) - this.agents.running.size - this.starting.size;
     const ready = Object.values(this.state.tasks)
       .filter((t) => t.status === 'ready' && t.autoStart && t.runner === this.user.id && !busy.has(t.id) && !this.starting.has(t.id))
+      .filter((t) => { const a = this.autoTried.get(t.id); return !a || (this.state.seq > a.seq && !(a.failed && t.updatedAt === a.updatedAt)); })
       .sort((a, b) => a.priority - b.priority || a.createdAt - b.createdAt);
     for (const t of ready) {
       if (slots-- <= 0) break;
-      this.startTask(t.id).catch((e) => this.send('tc:toast', { kind: 'error', text: `Could not start "${t.title}": ${e.message}` }));
+      const attempt = { seq: this.state.seq, updatedAt: t.updatedAt, failed: false };
+      this.autoTried.set(t.id, attempt);
+      this.startTask(t.id).catch((e) => {
+        attempt.failed = true;
+        if (e.code === 'claude_setup') {
+          // Every other task would fail the same way: stop auto-starting and say so once.
+          if (!this.autoPaused) this.send('tc:toast', { kind: 'error', text: `Agents paused. ${e.message}` });
+          this.autoPaused = e.message;
+        } else {
+          this.send('tc:toast', { kind: 'error', text: `Could not start "${t.title}": ${e.message}` });
+        }
+      });
     }
   }
 
-  async startTask(taskId) {
+  // Called when Claude Code settings change: try auto-starting again.
+  resumeAuto() {
+    this.autoPaused = null;
+    this.autoTried.clear();
+    if (this.agents) this.agents._verifiedClaude = null;
+    this._autoRun();
+  }
+
+  async startTask(taskId, opts = {}) {
     if (this.starting.has(taskId)) return null;
     this.starting.add(taskId);
-    try { return await this.agents.startTask(taskId); } finally { this.starting.delete(taskId); }
+    try {
+      const r = await this.agents.startTask(taskId, opts);
+      // Started by hand after a setup problem: auto-starting can carry on.
+      if (opts.manual) { this.autoPaused = null; this.autoTried.delete(taskId); }
+      return r;
+    } finally { this.starting.delete(taskId); }
   }
 
   // ---------- review & integration ----------
