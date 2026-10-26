@@ -27,9 +27,9 @@ Requirements:
 You can install Claude Code with `npm i -g @anthropic-ai/claude-code`. TeamCode also finds the copy that ships with the Claude desktop app. If Claude Code isn't signed in yet, click **Sign in to Claude Code** in the app.
 
 1. **Open a project**: pick a folder or repo, or clone one from Git.
-2. **Invite your team**: click **👥 Invite**, then **Share**, and send the `tc1.…` invite code to your teammates.
+2. **Invite your team**: click **Invite**, then **Share**, and send the `tc1.…` invite code to your teammates.
 3. **Teammates join**: in TeamCode they click **Join your team**, paste the code and pick a folder. The files sync down and stay in sync from then on.
-4. **Create tasks**: use **＋ New task**, or **✨ Plan a feature** to have Claude split a feature into parallel tasks. Tasks marked ⚡ auto start an agent as soon as their dependencies are done.
+4. **Create tasks**: use **New task**, or **Plan a feature** to have Claude split a feature into parallel tasks. Tasks marked **auto** start an agent as soon as their dependencies are done.
 5. **Watch and steer**: the **Agents** panel shows every agent's task, status, the files it's editing, its progress, discoveries, conflicts and blockers. Open an agent's live log to message it.
 6. **Review and merge**: the **Review** panel shows each task's diff and four separate gates (Completed → Tests → Integration → Approval). From there you can approve and merge, reject, or revert.
 
@@ -226,13 +226,19 @@ scripts/       smoke test, icon generator
 
 - **Installers** are built by GitHub Actions (`.github/workflows/release.yml`) when you push a version tag:
   `npm version patch && git push --follow-tags` → tests run, then Windows (`.exe`) and macOS (`.dmg`, Apple Silicon + Intel) installers are attached to a GitHub release.
-- **Website** (`website/`) is a zero-dependency Node server for Railway. It shows the landing page and serves the latest release's installers from this private repo via `/download/windows`, `/download/mac-arm64`, `/download/mac-x64` (redirects to short-lived signed GitHub URLs).
-  Railway variables: `GITHUB_REPO=lbakes111/teamcode`, `GITHUB_TOKEN=<fine-grained token with read-only Contents access to this repo>`.
+- **Website** (`website/`) is a zero-dependency Node server for Railway. It shows the landing page and serves the latest release's installers via `/download/windows`, `/download/mac-arm64`, `/download/mac-x64` (redirects to short-lived signed GitHub URLs).
+  On Railway it reads releases from the repo it deploys from. Set `GITHUB_TOKEN=<fine-grained token with read-only Contents access>` only if the repo is private; set `GITHUB_REPO=owner/name` to read releases from a different repo.
 - Installers are not code-signed yet: Windows shows a SmartScreen prompt and macOS needs `xattr -cr /Applications/TeamCode.app` (the site explains both). Signing needs a Windows code-signing certificate and an Apple Developer ID.
 
-### Railway services (summary)
+### Deploy on Railway
 
-| Service | Root dir | Start | Variables |
-| --- | --- | --- | --- |
-| Website | `website/` | `node server.js` (`website/railway.json`) | `GITHUB_REPO=lbakes111/teamcode`, `GITHUB_TOKEN` (fine-grained, Contents read-only, created by the repo owner) |
-| Team workspace server (optional, for remote teams) | repo root | build `npm ci --omit=dev`, start `node server/standalone.js` | `TEAMCODE_WORKSPACE`, `TEAMCODE_NAME`, `TEAMCODE_TOKEN` (random secret), `TEAMCODE_DATA=/data` + a volume at `/data`. The invite code is printed in the deploy logs. |
+1. In Railway: **New Project → Deploy from GitHub repo** and pick this repo. No settings needed: the root `railway.json` builds `website/Dockerfile` and health-checks `/health`.
+2. **Settings → Networking → Generate Domain** to get a public URL.
+3. If the repo is private, add the `GITHUB_TOKEN` variable so download buttons work.
+
+Railway only lists repos its GitHub app can see. If this repo doesn't show up, install the Railway app on the account that owns the repo (github.com/apps/railway-app → Configure) and give it access.
+
+| Service | Railway config file | Variables |
+| --- | --- | --- |
+| Website | `railway.json` (default) | `GITHUB_TOKEN` if the repo is private; optional `GITHUB_REPO` |
+| Team workspace server (optional, for remote teams) | set **Settings → Config-as-code → Railway config file** to `server/railway.json` | `TEAMCODE_WORKSPACE`, `TEAMCODE_NAME`, `TEAMCODE_TOKEN` (random secret), plus a volume mounted at `/data`. The invite code is printed in the deploy logs. |

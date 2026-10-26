@@ -19,7 +19,7 @@ const S = {
 
 // ---------- helpers ----------
 const hue = (s) => [...String(s)].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 360, 7);
-const avatar = (name, cls = '') => `<span class="avatar ${cls}" style="background:hsl(${hue(name)} 62% 52%)">${esc(String(name || '?').trim()[0]?.toUpperCase() || '?')}</span>`;
+const avatar = (name, cls = '') => `<span class="avatar ${cls}" style="background:hsl(${hue(name)} 32% 44%)">${esc(String(name || '?').trim()[0]?.toUpperCase() || '?')}</span>`;
 function ago(ts) {
   if (!ts) return '';
   const s = Math.max(0, (Date.now() - ts) / 1000);
@@ -55,23 +55,25 @@ async function run(fn, okMsg) {
 
 const STATUS = {
   working: ['green pulse', 'Working'], starting: ['blue pulse', 'Starting'], idle: ['', 'Idle'], waiting: ['amber', 'Waiting'],
-  blocked: ['red', 'Blocked'], stale: ['amber', 'No heartbeat'], offline: ['', 'Offline'], done: ['violet', 'Done'], error: ['red', 'Error'], stopped: ['', 'Stopped'],
+  blocked: ['red', 'Blocked'], stale: ['amber', 'No heartbeat'], offline: ['', 'Offline'], done: ['ink', 'Done'], error: ['red', 'Error'], stopped: ['', 'Stopped'],
 };
-const statusPill = (s) => { const [c, l] = STATUS[s] || ['', s]; return `<span class="pill ${c}">${esc(l)}</span>`; };
+const statusPill = (s) => { const [c, l] = STATUS[s] || ['', s]; return `<span class="st ${c}">${esc(l)}</span>`; };
 const TSTATUS = {
   waiting: ['amber', 'Waiting on deps'], ready: ['blue', 'Ready'], running: ['green pulse', 'Running'], blocked: ['red', 'Blocked'],
-  done: ['violet', 'Completed'], failed: ['red', 'Failed'], cancelled: ['', 'Cancelled'],
+  done: ['ink', 'Completed'], failed: ['red', 'Failed'], cancelled: ['', 'Cancelled'],
 };
-const taskPill = (s) => { const [c, l] = TSTATUS[s] || ['', s]; return `<span class="pill ${c}">${esc(l)}</span>`; };
+const taskPill = (s) => { const [c, l] = TSTATUS[s] || ['', s]; return `<span class="st ${c}">${esc(l)}</span>`; };
+const modeTag = (mode) => (mode === 'isolated' ? `<span class="tag">${icon('branch')}isolated</span>` : `<span class="tag">${icon('folder')}shared</span>`);
 
+// [row class, icon] for each event type.
 function evKind(t) {
-  if (t.startsWith('chat')) return ['chat', '💬'];
-  if (t.startsWith('conflict')) return ['conflict', t === 'conflict.resolved' ? '✅' : '⚠️'];
-  if (t.startsWith('task')) return ['task', { 'task.completed': '🏁', 'task.failed': '❌', 'task.started': '▶️', 'task.ready': '🟢', 'task.blocked': '⛔' }[t] || '📋'];
-  if (t.startsWith('file')) return ['file', t === 'file.changed' ? '✏️' : t === 'file.edit_started' ? '🔒' : t === 'file.edit_completed' ? '🔓' : '📄'];
-  if (t.startsWith('changes')) return ['task', { 'changes.merged': '🔀', 'changes.approved': '👍', 'changes.rejected': '👎', 'changes.reverted': '↩️' }[t] || '👀'];
-  if (t.startsWith('agent')) return ['agent', t === 'agent.error' ? '🐞' : t === 'agent.joined' ? '🤖' : '📣'];
-  return ['', { 'decision.recorded': '🧭', 'contract.updated': '📐', 'blocker.reported': '🚧', 'blocker.resolved': '🛠️', 'note.added': '💡', 'test.completed': '🧪', 'branch.created': '🌿', 'coordination.requested': '🤝', 'integration.checked': '🔍', 'user.joined': '👋', 'user.left': '👋' }[t] || '•'];
+  if (t.startsWith('chat')) return ['chat', 'message'];
+  if (t.startsWith('conflict')) return t === 'conflict.resolved' ? ['ok', 'check'] : ['conflict', 'warn'];
+  if (t.startsWith('task')) return { 'task.completed': ['ok', 'flag'], 'task.failed': ['bad', 'x'], 'task.started': ['', 'play'], 'task.ready': ['', 'arrow'], 'task.blocked': ['bad', 'block'] }[t] || ['', 'tasks'];
+  if (t.startsWith('file')) return ['', t === 'file.changed' ? 'edit' : t === 'file.edit_started' || t === 'file.edit_completed' ? 'lock' : 'file'];
+  if (t.startsWith('changes')) return { 'changes.merged': ['ok', 'merge'], 'changes.approved': ['ok', 'check'], 'changes.rejected': ['bad', 'x'], 'changes.reverted': ['', 'revert'] }[t] || ['', 'eye'];
+  if (t.startsWith('agent')) return t === 'agent.error' ? ['bad', 'bug'] : ['', t === 'agent.joined' ? 'agent' : 'megaphone'];
+  return ['', { 'decision.recorded': 'compass', 'contract.updated': 'braces', 'blocker.reported': 'block', 'blocker.resolved': 'check', 'note.added': 'bulb', 'test.completed': 'flask', 'branch.created': 'branch', 'coordination.requested': 'exchange', 'integration.checked': 'search', 'user.joined': 'user', 'user.left': 'user' }[t] || 'dot'];
 }
 
 function eventRow(e, { compact } = {}) {
@@ -79,8 +81,8 @@ function eventRow(e, { compact } = {}) {
   const delivered = e.deliveredTo?.length ? ` · delivered to ${esc(e.deliveredTo.join(', '))}` : '';
   const task = e.task && S.state?.tasks[e.task];
   return `<div class="ev ${cls}" title="${esc(e.type)} · #${e.seq}">
-    <div class="ico">${ico}</div>
-    <div><div>${esc(e.summary)}</div>${compact ? '' : `<div class="meta">${esc(e.actor.name)} · ${esc(e.type)}${task ? ` · ${esc(task.title)}` : ''}${e.branch && e.branch !== 'main' ? ` · ${esc(e.branch)}` : ''}${delivered}</div>`}</div>
+    <div class="ico">${icon(ico)}</div>
+    <div class="txt"><div>${esc(e.summary)}</div>${compact ? '' : `<div class="meta">${esc(e.actor.name)} · ${esc(e.type)}${task ? ` · ${esc(task.title)}` : ''}${e.branch && e.branch !== 'main' ? ` · ${esc(e.branch)}` : ''}${delivered}</div>`}</div>
     <div class="time" title="${new Date(e.ts).toLocaleString()}">${clock(e.ts)}</div>
   </div>`;
 }
@@ -112,36 +114,46 @@ function renderNow() {
 
 function claudeBanner() {
   const c = S.init.claude;
-  if (S.needsLogin || c.loggedIn === false) return `<div class="banner warn"><span>🔑</span><div class="spacer"><b>Claude Code needs you to sign in.</b> <span class="muted">Agents can't run until you do. It only takes a moment.</span></div><button class="btn primary sm" data-act="login">Sign in to Claude Code</button></div>`;
-  if (!c.path) return `<div class="banner warn"><span>⚠️</span><div class="spacer"><b>Claude Code not found.</b> <span class="muted">Install it (npm i -g @anthropic-ai/claude-code) or point TeamCode at it.</span></div><button class="btn sm" data-act="detect-claude">Detect again</button><button class="btn sm" data-act="browse-claude">Locate…</button></div>`;
-  return `<div class="banner ok"><span>✅</span><div class="spacer"><b>Claude Code ready</b> <span class="muted">${esc(c.version || '')} · ${esc(c.path)}</span></div><button class="btn sm ghost" data-act="login">Sign in / switch account</button></div>`;
+  if (S.needsLogin || c.loggedIn === false) return `<div class="banner warn">${icon('key')}<div class="spacer"><b>Sign in to Claude Code.</b> <span class="muted">Agents can't run until you do.</span></div><button class="btn primary sm" data-act="login">Sign in</button></div>`;
+  if (!c.path) return `<div class="banner warn">${icon('warn')}<div class="spacer"><b>Claude Code not found.</b> <span class="muted">Install it with <code>npm i -g @anthropic-ai/claude-code</code> or point TeamCode at it.</span></div><button class="btn sm" data-act="detect-claude">Detect again</button><button class="btn sm" data-act="browse-claude">Locate…</button></div>`;
+  return `<div class="banner ok">${icon('check')}<div class="spacer"><b>Claude Code ready</b> <span class="muted mono">${esc(c.version || '')}</span></div><button class="btn sm ghost" data-act="login">Switch account</button></div>`;
 }
 
 function welcome() {
   const u = me();
   const recent = S.init.projects;
-  return `<div class="welcome"><div class="welcome-inner">
-    <div class="brand"><div class="logo">TC</div><div><h1>TeamCode</h1><div class="muted">Your team and its AI agents, working on one codebase at the same time.</div></div></div>
-    ${!u.name ? `<div class="panel panel-body col"><h3>👋 What should your team call you?</h3><div class="row"><input id="w-name" placeholder="Your name" maxlength="40"><button class="btn primary" data-act="save-name">Continue</button></div></div>` : ''}
-    ${claudeBanner()}
-    <div class="cards3">
-      <button class="big-card" data-act="open-folder"><div class="emoji">📂</div><h3>Open a project</h3><div class="muted small">Pick a local folder or repository. You host the workspace and can invite your team.</div></button>
-      <button class="big-card" data-act="join-modal"><div class="emoji">🤝</div><h3>Join your team</h3><div class="muted small">Paste the invite code a teammate shared. Files sync to a folder you choose.</div></button>
-      <button class="big-card" data-act="clone-modal"><div class="emoji">⬇️</div><h3>Clone from Git</h3><div class="muted small">Clone a GitHub/GitLab repository and open it as a TeamCode project.</div></button>
-    </div>
-    ${recent.length ? `<div class="col"><h4>Recent projects</h4><div class="recent">${recent.map((p) => `
-      <div class="recent-item" data-act="open-recent" data-root="${esc(p.root)}" data-ws="${esc(p.workspace)}">
-        ${avatar(p.name)}<div class="spacer"><b>${esc(p.name)}</b><div class="muted small">${esc(p.root)}</div></div>
-        <span class="pill nodot ${p.role === 'host' ? 'violet' : 'blue'}">${p.role === 'host' ? 'Host' : 'Member'}</span>
-        <span class="faint small">${ago(p.lastOpened)}</span>
-      </div>`).join('')}</div></div>` : ''}
-    <div class="muted small">Tip: everyone on the team runs TeamCode with their own Claude Code. The host's computer runs the shared workspace — or run <code>npm run server</code> on an always-on machine.</div>
-  </div></div>`;
+  const action = (act, ico, title, text) => `<button class="action-row" data-act="${act}"><span class="ai">${icon(ico)}</span><span><b>${title}</b><span class="muted small">${text}</span></span><span class="chev">${icon('arrow')}</span></button>`;
+  return `<div class="welcome">
+    <aside class="welcome-side">
+      <div class="wordmark">${brandMark(22)}TeamCode</div>
+      <div class="col" style="gap:12px"><h1>One codebase. Your team and all its agents.</h1>
+      <p>Everyone runs their own Claude Code. TeamCode keeps the agents aware of each other, syncs every save, and holds work for review before it lands.</p></div>
+      <div class="side-foot">
+        ${claudeBanner()}
+        <div class="small muted">The host's computer runs the shared workspace. For an always-on team, run <code>npm run server</code> on a server.</div>
+      </div>
+    </aside>
+    <main class="welcome-main">
+      ${!u.name ? `<div class="col"><h4>Your name</h4><div class="row"><input id="w-name" placeholder="What should your team call you?" maxlength="40"><button class="btn primary" data-act="save-name">Continue</button></div></div>` : ''}
+      <div class="col"><h4>Start</h4><div class="actions-list">
+        ${action('open-folder', 'folder', 'Open a project', 'Pick a local folder or repo. You host the workspace and invite your team.')}
+        ${action('join-modal', 'users', 'Join your team', 'Paste an invite code. Files sync into a folder you choose.')}
+        ${action('clone-modal', 'download', 'Clone from Git', 'Clone a GitHub or GitLab repository and open it as a project.')}
+      </div></div>
+      ${recent.length ? `<div class="col"><h4>Recent</h4><div class="recent">${recent.map((p) => `
+        <div class="recent-item" data-act="open-recent" data-root="${esc(p.root)}" data-ws="${esc(p.workspace)}">
+          ${avatar(p.name)}<div style="min-width:0"><b>${esc(p.name)}</b><div class="faint small ellipsis mono">${esc(p.root)}</div></div>
+          <span class="tag">${p.role === 'host' ? 'Host' : 'Member'}</span>
+          <span class="faint small">${ago(p.lastOpened)}</span>
+        </div>`).join('')}</div></div>` : ''}
+    </main>
+  </div>`;
 }
 
+// [key, icon, label, nav group]
 const VIEWS = [
-  ['agents', '🤖', 'Agents'], ['tasks', '📋', 'Tasks'], ['activity', '⚡', 'Activity'], ['review', '👀', 'Review'],
-  ['context', '🧭', 'Context'], ['files', '🗂️', 'Files'], ['settings', '⚙️', 'Settings'],
+  ['agents', 'agent', 'Agents', 'Work'], ['tasks', 'tasks', 'Tasks', 'Work'], ['review', 'review', 'Review', 'Work'], ['activity', 'activity', 'Activity', 'Team'],
+  ['context', 'context', 'Context', 'Team'], ['files', 'files', 'Files', 'Team'], ['settings', 'settings', 'Settings', 'Project'],
 ];
 
 function counts() {
@@ -161,35 +173,39 @@ function shell() {
   const conn = { online: ['green', 'Live'], connecting: ['amber pulse', 'Connecting'], offline: ['red', 'Offline'] }[S.status] || ['', S.status];
   const people = S.presence.length ? S.presence : [{ id: me().id, name: me().name }];
   const sync = S.sync;
+  const view = VIEWS.find((v) => v[0] === S.view);
+  let group = null;
+  const nav = VIEWS.map(([k, ico, label, g], i) => {
+    const n = c[k];
+    const head = g !== group ? `${group ? '</nav>' : ''}<h4 class="nav-label">${g}</h4><nav class="nav">` : '';
+    group = g;
+    return `${head}<button class="${S.view === k ? 'on' : ''}" data-act="view" data-view="${k}" title="${label} (${MOD}+${i + 1})">${icon(ico)}${label}${n ? `<span class="count ${k === 'context' || k === 'review' ? 'alert' : ''}">${n}</span>` : ''}</button>`;
+  }).join('') + '</nav>';
   return `<div class="shell">
     <aside class="sidebar">
       <div class="side-head">
-        <div class="row"><div class="logo" style="width:30px;height:30px;font-size:12px;border-radius:9px">TC</div><div class="spacer ellipsis proj" title="${esc(p.root)}">${esc(p.name)}</div></div>
-        <div class="row"><span class="pill ${conn[0]}">${conn[1]}</span><span class="pill nodot ${p.role === 'host' ? 'violet' : 'blue'}">${p.role === 'host' ? (p.shared ? 'Hosting · shared' : 'Hosting') : 'Joined'}</span></div>
+        <button class="proj-switch" data-act="close-project" title="${esc(p.root)} — back to all projects">${brandMark(26)}<span class="spacer"><span class="proj ellipsis" style="display:block">${esc(p.name)}</span><span class="sub">${p.role === 'host' ? (p.shared ? 'Hosting · shared' : 'Hosting') : 'Joined'}</span></span></button>
       </div>
-      <nav class="nav">${VIEWS.map(([k, ico, label], i) => {
-        const n = c[k];
-        return `<button class="${S.view === k ? 'on' : ''}" data-act="view" data-view="${k}" title="${label} (${MOD}+${i + 1})"><span class="ico">${ico}</span>${label}${n ? `<span class="count ${k === 'context' || k === 'review' ? 'alert' : ''}">${n}</span>` : ''}</button>`;
-      }).join('')}</nav>
+      ${nav}
       <div class="spacer"></div>
       <div class="side-section">
-        <div class="row"><h4>Team online</h4><span class="spacer"></span><button class="icon-btn" data-act="invite" title="Invite teammates">＋</button></div>
-        <div class="people">${people.map((u) => `<div class="person">${avatar(u.name, 'sm round')}<span class="ellipsis">${esc(u.name)}${u.id === me().id ? ' <span class="faint">(you)</span>' : ''}</span><span class="dot"></span></div>`).join('')}</div>
+        <div class="row" style="padding:0 6px"><h4>Online</h4><span class="spacer"></span><span class="st ${conn[0]}">${conn[1]}</span><button class="icon-btn" data-act="invite" title="Invite teammates">${icon('plus')}</button></div>
+        <div class="people">${people.map((u) => `<div class="person">${avatar(u.name, 'sm')}<span class="ellipsis">${esc(u.name)}${u.id === me().id ? ' <span class="faint">you</span>' : ''}</span><span class="dot"></span></div>`).join('')}</div>
       </div>
-      <div class="side-section small muted">
-        ${sync ? `<div class="row">${sync.ready ? '🔄 Synced' : '<span class="spinner" style="width:12px;height:12px"></span> Syncing…'}<span class="spacer"></span><span title="uploaded / downloaded">↑${sync.up} ↓${sync.down}</span></div>${sync.conflicts?.length ? `<div style="color:var(--red)">⚠️ ${sync.conflicts.length} file conflict(s)</div>` : ''}` : ''}
-        <div class="row"><button class="btn sm ghost" data-act="close-project">← All projects</button></div>
-      </div>
+      ${sync ? `<div class="side-section">
+        <div class="sync-line">${sync.ready ? icon('sync') + ' Synced' : '<span class="spinner"></span> Syncing…'}<span class="spacer"></span><span class="num" title="uploaded / downloaded">↑${sync.up} ↓${sync.down}</span></div>
+        ${sync.conflicts?.length ? `<div class="sync-line" style="color:var(--red)">${icon('warn')} ${sync.conflicts.length} file conflict${sync.conflicts.length === 1 ? '' : 's'}</div>` : ''}
+      </div>` : ''}
     </aside>
     <section class="main">
       <div class="topbar">
-        <h2>${esc(VIEWS.find((v) => v[0] === S.view)[2])}</h2>
+        <div class="crumbs"><span class="muted ellipsis">${esc(p.name)}</span><span class="sep">/</span><span class="here">${esc(view[2])}</span></div>
         <span class="spacer"></span>
-        <button class="btn" data-act="invite">👥 Invite</button>
-        <button class="btn" data-act="plan-modal" title="Let Claude split a feature into parallel tasks">✨ Plan a feature</button>
-        <button class="btn primary" data-act="task-modal" title="${MOD}+N">＋ New task</button>
+        <button class="btn ghost" data-act="invite">${icon('users')}Invite</button>
+        <button class="btn" data-act="plan-modal" title="Let Claude split a feature into parallel tasks (${MOD}+P)">${icon('plan')}Plan a feature</button>
+        <button class="btn primary" data-act="task-modal" title="${MOD}+N">${icon('plus')}New task</button>
       </div>
-      ${S.needsLogin || !S.init.claude.path || S.init.claude.loggedIn === false ? `<div style="padding:12px 20px 0">${claudeBanner()}</div>` : ''}
+      ${S.needsLogin || !S.init.claude.path || S.init.claude.loggedIn === false ? `<div style="padding:16px 24px 0">${claudeBanner()}</div>` : ''}
       ${S.state ? VIEW_RENDER[S.view]() : `<div class="view"><div class="empty"><span class="spinner"></span><div>${S.status === 'offline' ? 'Reconnecting to the team workspace…' : 'Connecting to the team workspace…'}</div></div></div>`}
     </section>
   </div>`;
@@ -205,51 +221,60 @@ function agentCard(a) {
   const errors = a.updates.filter((u) => u.kind === 'error').slice(-2);
   const updates = a.updates.filter((u) => u.kind !== 'error').slice(-3).reverse();
   const cls = a.status === 'stale' ? 'stale' : a.status;
+  const files = a.editing.length ? a.editing : a.edited.slice(-6).map((path) => ({ path }));
   return `<div class="agent-card ${cls}">
-    <div class="row">${avatar(a.name)}<div class="spacer" style="min-width:0"><div class="row"><b>${esc(a.name)}</b>${statusPill(a.status)}</div>
-      <div class="tiny muted ellipsis">${esc(a.client)}${owner ? ` · ${esc(owner)}'s computer` : ''} · ${a.mode === 'isolated' ? `🌿 ${esc(a.branch)}` : 'shared copy'}</div></div>
-      ${rt?.costUsd ? `<span class="tiny faint" title="Claude usage cost">$${rt.costUsd.toFixed(2)}</span>` : ''}
+    <div class="sec">
+      <div class="row">${avatar(a.name)}<div class="spacer"><div class="row"><b>${esc(a.name)}</b><span class="spacer"></span>${statusPill(a.status)}</div>
+        <div class="tiny faint ellipsis">${esc(a.client)}${owner ? ` · ${esc(owner)}'s computer` : ''}${rt?.costUsd ? ` · <span class="num" title="Claude usage cost">$${rt.costUsd.toFixed(2)}</span>` : ''}</div></div>
+      </div>
+      ${t ? `<div class="task-line" title="${esc(t.title)}">${esc(t.title)}</div>
+        <div class="meta-line">${taskPill(t.status)}${a.mode === 'isolated' ? `<span class="mono" title="Branch">${icon('branch')}${esc(a.branch)}</span>` : `<span>${icon('folder')}shared copy</span>`}${t.review?.state === 'pending' ? '<span class="tag blue">Awaiting review</span>' : ''}${t.integration?.state === 'merged' ? '<span class="tag green">Merged</span>' : ''}</div>` : '<span class="muted">No task assigned</span>'}
+      ${a.detail && !['working'].includes(a.status) ? `<div class="small muted">${esc(a.detail)}</div>` : ''}
     </div>
-    <div>${t ? `<div class="task-line ellipsis" title="${esc(t.title)}">📋 ${esc(t.title)}</div><div class="row tiny" style="margin-top:3px">${taskPill(t.status)}${t.review?.state === 'pending' ? '<span class="pill blue">Awaiting review</span>' : ''}${t.integration?.state === 'merged' ? '<span class="pill green">Merged</span>' : ''}</div>` : '<span class="muted">No task assigned</span>'}</div>
-    ${a.detail && !['working'].includes(a.status) ? `<div class="tiny muted">${esc(a.detail)}</div>` : ''}
-    ${a.editing.length ? `<div><div class="tiny muted" style="margin-bottom:4px">Editing now</div><div class="files">${a.editing.slice(0, 8).map((f) => `<span class="chip ${f.mode === 'exclusive' ? 'warn' : ''}" title="${esc(f.intent || f.path)}">${f.mode === 'exclusive' ? '🔒 ' : ''}${esc(f.path)}</span>`).join('')}${a.editing.length > 8 ? `<span class="chip">+${a.editing.length - 8}</span>` : ''}</div></div>` : ''}
-    ${!a.editing.length && a.edited.length ? `<div><div class="tiny muted" style="margin-bottom:4px">Changed</div><div class="files">${a.edited.slice(-6).map((f) => `<span class="chip">${esc(f)}</span>`).join('')}</div></div>` : ''}
-    ${updates.length ? `<div class="updates">${updates.map((u) => `<div class="u"><span>${u.kind === 'discovery' ? '💡' : u.kind === 'approach' ? '🔀' : '📣'}</span><span><b>${esc(u.message)}</b> <span class="faint">${ago(u.at)}</span></span></div>`).join('')}</div>` : ''}
-    ${errors.map((u) => `<div class="errbox">🐞 ${esc(u.message)}</div>`).join('')}
-    ${conflicts.map((c) => `<div class="warnbox">⚠️ ${esc(c.message)}</div>`).join('')}
-    ${waiting.length ? `<div class="warnbox">⏳ Waiting on: ${waiting.map((d) => esc(d.title)).join(', ')}</div>` : ''}
-    <div class="row tiny faint">${a.pendingEvents ? `<span title="Relevant team updates not yet delivered to this agent">📬 ${a.pendingEvents} pending update(s)</span>` : '<span title="All relevant updates delivered">📭 Up to date</span>'}<span class="spacer"></span><span>seen ${ago(a.lastSeen)}</span></div>
-    <div class="row">
-      ${rt ? `<button class="btn sm" data-act="agent-log" data-id="${a.id}">📜 Live log</button>` : `<button class="btn sm" data-act="agent-detail" data-id="${a.id}">Details</button>`}
-      ${rt ? `<button class="btn sm" data-act="agent-msg" data-id="${a.id}">💬 Message</button>` : ''}
+    ${files.length || updates.length || errors.length || conflicts.length || waiting.length ? `<div class="sec">
+      ${files.length ? `<div class="col" style="gap:5px"><h4>${a.editing.length ? 'Editing now' : 'Changed'}</h4><div class="files">${files.slice(0, 8).map((f) => `<span class="chip ${f.mode === 'exclusive' ? 'warn' : ''}" title="${esc(f.intent || f.path)}">${f.mode === 'exclusive' ? icon('lock') : ''}${esc(f.path)}</span>`).join('')}${files.length > 8 ? `<span class="chip">+${files.length - 8}</span>` : ''}</div></div>` : ''}
+      ${updates.length ? `<div class="updates">${updates.map((u) => `<div class="u">${icon(u.kind === 'discovery' ? 'bulb' : u.kind === 'approach' ? 'exchange' : 'megaphone')}<span><b>${esc(u.message)}</b> <span class="faint">${ago(u.at)}</span></span></div>`).join('')}</div>` : ''}
+      ${errors.map((u) => `<div class="errbox">${icon('bug')}<span>${esc(u.message)}</span></div>`).join('')}
+      ${conflicts.map((c) => `<div class="warnbox">${icon('warn')}<span>${esc(c.message)}</span></div>`).join('')}
+      ${waiting.length ? `<div class="warnbox">${icon('clock')}<span>Waiting on ${waiting.map((d) => esc(d.title)).join(', ')}</span></div>` : ''}
+    </div>` : ''}
+    <div class="foot">
+      <span class="tiny faint" title="${a.pendingEvents ? 'Relevant team updates not yet delivered to this agent' : 'All relevant updates delivered'}">${a.pendingEvents ? `${icon('inbox')} ${a.pendingEvents} pending` : 'Up to date'} · seen ${ago(a.lastSeen)}</span>
       <span class="spacer"></span>
-      ${rt?.running ? `<button class="btn sm danger" data-act="agent-stop" data-id="${a.id}">■ Stop</button>` : ''}
+      ${rt ? `<button class="btn sm ghost" data-act="agent-msg" data-id="${a.id}">${icon('message')}Message</button><button class="btn sm" data-act="agent-log" data-id="${a.id}">${icon('terminal')}Log</button>` : `<button class="btn sm" data-act="agent-detail" data-id="${a.id}">Details</button>`}
+      ${rt?.running ? `<button class="icon-btn" data-act="agent-stop" data-id="${a.id}" title="Stop agent" style="color:var(--red)">${icon('stop')}</button>` : ''}
     </div>
   </div>`;
 }
+
+function emptyState(ico, title, text, actions = '') {
+  return `<div class="panel empty"><div class="ei">${icon(ico)}</div><h3>${title}</h3><div>${text}</div>${actions ? `<div class="row">${actions}</div>` : ''}</div>`;
+}
+const START_ACTIONS = `<button class="btn primary" data-act="task-modal">${icon('plus')}New task</button><button class="btn" data-act="plan-modal">${icon('plan')}Plan a feature</button>`;
 
 function viewAgents() {
   const all = agents().sort((a, b) => (b.lastSeen || 0) - (a.lastSeen || 0));
   const live = all.filter((a) => ACTIVE.has(a.status) || a.status === 'stale');
   const finished = all.filter((a) => !live.includes(a)).slice(0, 12);
   const t = tasks();
-  const stat = (n, l) => `<div class="stat"><div class="n">${n}</div><div class="l">${l}</div></div>`;
+  const stat = (n, l, alert) => `<div class="stat"><div class="n ${alert && n ? 'alert' : ''}">${n}</div><div class="l">${l}</div></div>`;
   const recent = S.events.filter((e) => !['user.joined', 'user.left'].includes(e.type)).slice(-60).reverse();
   return `<div class="view split">
     <div data-scroll="agents">
       <div class="stats">
-        ${stat(live.filter((a) => a.status === 'working').length, 'agents working')}
-        ${stat(t.filter((x) => x.status === 'ready').length, 'tasks ready to start')}
-        ${stat(t.filter((x) => x.status === 'waiting').length, 'waiting on dependencies')}
-        ${stat(t.filter((x) => x.status === 'blocked').length + live.filter((a) => a.status === 'blocked').length, 'blocked')}
-        ${stat(t.filter((x) => x.review?.state === 'pending').length, 'awaiting review')}
+        ${stat(live.filter((a) => a.status === 'working').length, 'Working')}
+        ${stat(t.filter((x) => x.status === 'ready').length, 'Ready to start')}
+        ${stat(t.filter((x) => x.status === 'waiting').length, 'Waiting on deps')}
+        ${stat(t.filter((x) => x.status === 'blocked').length + live.filter((a) => a.status === 'blocked').length, 'Blocked', true)}
+        ${stat(t.filter((x) => x.review?.state === 'pending').length, 'Awaiting review')}
       </div>
-      ${live.length ? `<div class="agent-grid">${live.map(agentCard).join('')}</div>` : `<div class="panel empty"><div class="emoji">🤖</div><h3>No agents running</h3><div>Create tasks and start them — each task gets its own Claude Code agent. Agents see each other's work in real time.</div><div class="row"><button class="btn primary" data-act="task-modal">＋ New task</button><button class="btn" data-act="plan-modal">✨ Plan a feature</button></div></div>`}
-      ${finished.length ? `<details style="margin-top:18px"><summary class="muted">Finished agents (${finished.length})</summary><div class="agent-grid" style="margin-top:12px">${finished.map(agentCard).join('')}</div></details>` : ''}
+      ${live.length ? `<div class="section-label"><h4>Running</h4><span class="faint num tiny">${live.length}</span></div><div class="agent-grid">${live.map(agentCard).join('')}</div>`
+        : emptyState('agent', 'No agents running', 'Each task gets its own Claude Code agent. Start a task and its agent sees everyone else\'s work as it happens.', START_ACTIONS)}
+      ${finished.length ? `<details class="more" style="margin-top:22px"><summary>${icon('down')}Finished agents · ${finished.length}</summary><div class="agent-grid" style="margin-top:12px">${finished.map(agentCard).join('')}</div></details>` : ''}
     </div>
     <div class="panel" style="display:flex;flex-direction:column">
-      <div class="panel-head"><h3>Live activity</h3><span class="spacer"></span><button class="btn sm ghost" data-act="view" data-view="activity">All →</button></div>
-      <div class="panel-body timeline compact" style="overflow:auto;flex:1" data-scroll="mini">${recent.map((e) => eventRow(e, { compact: true })).join('') || '<div class="muted small">Nothing yet.</div>'}</div>
+      <div class="panel-head"><span class="st green pulse"></span><h3>Live activity</h3><span class="spacer"></span><button class="btn sm ghost" data-act="view" data-view="activity">View all</button></div>
+      <div class="timeline compact" style="overflow:auto;flex:1;padding:4px 14px" data-scroll="mini">${recent.map((e) => eventRow(e, { compact: true })).join('') || '<div class="muted small" style="padding:10px 0">Nothing yet.</div>'}</div>
     </div>
   </div>`;
 }
@@ -260,26 +285,28 @@ function runningAgentFor(taskId) {
 }
 
 // Mirrors the server rule: shared-mode work only sees an isolated dependency once it is merged.
-const depIcon = (d, t) => (d.status !== 'done' ? '⏳' : d.mode === 'isolated' && t.mode !== 'isolated' && d.integration?.state !== 'merged' ? '🔀' : '✅');
+const depKind = (d, t) => (d.status !== 'done' ? 'wait' : d.mode === 'isolated' && t.mode !== 'isolated' && d.integration?.state !== 'merged' ? 'merge' : 'done');
+const DEP_ICON = { wait: 'clock', merge: 'merge', done: 'check' };
 
 function taskCard(t) {
   const deps = t.dependsOn.map((d) => S.state.tasks[d]).filter(Boolean);
   const agentId = runningAgentFor(t.id);
   const mine = !t.runner || t.runner === me().id;
+  const who = [t.assigneeName && `<span>${icon('agent')}${esc(t.assigneeName)}</span>`, t.runnerName && `<span>${icon('monitor')}${esc(t.runnerName)}</span>`].filter(Boolean).join('');
   return `<div class="task-card" data-act="task-detail" data-id="${t.id}">
-    <div class="row"><span class="prio p${t.priority}">P${t.priority}</span><span class="title spacer">${esc(t.title)}</span></div>
-    <div class="row wrap tiny">${taskPill(t.status)}<span class="pill nodot">${t.mode === 'isolated' ? '🌿 isolated' : '📁 shared'}</span>${t.autoStart ? '<span class="pill nodot" title="Starts automatically when ready">⚡ auto</span>' : ''}</div>
-    ${deps.length ? `<div class="deps">${deps.map((d) => `<span>${depIcon(d, t)} ${esc(d.title)}${d.status === 'done' && depIcon(d, t) === '🔀' ? ' <span class="faint">(needs merge)</span>' : ''}</span>`).join('')}</div>` : ''}
-    ${t.parallelNotes?.length ? `<div class="warnbox tiny">Shares files with ${t.parallelNotes.map((p) => `"${esc(p.title)}"`).join(', ')} — avoid running together</div>` : ''}
-    <div class="row tiny muted">${[t.assigneeName && `🤖 ${esc(t.assigneeName)}`, t.runnerName && `💻 ${esc(t.runnerName)}`].filter(Boolean).join(' · ')}</div>
+    <div class="row top"><span class="title spacer">${esc(t.title)}</span><span class="prio p${t.priority}">P${t.priority}</span></div>
+    <div class="row wrap" style="gap:6px">${taskPill(t.status)}<span class="spacer"></span>${modeTag(t.mode)}${t.autoStart ? `<span class="tag" title="Starts automatically when ready">${icon('zap')}auto</span>` : ''}</div>
+    ${deps.length ? `<div class="deps">${deps.map((d) => { const k = depKind(d, t); return `<span class="${k}">${icon(DEP_ICON[k])}<span class="ellipsis">${esc(d.title)}</span>${k === 'merge' ? '<span class="faint">needs merge</span>' : ''}</span>`; }).join('')}</div>` : ''}
+    ${t.parallelNotes?.length ? `<div class="warnbox tiny">${icon('warn')}<span>Shares files with ${t.parallelNotes.map((p) => `“${esc(p.title)}”`).join(', ')}. Avoid running together.</span></div>` : ''}
+    ${who ? `<div class="meta-line">${who}</div>` : ''}
     <div class="actions">
-      ${['ready', 'waiting', 'failed'].includes(t.status) && mine && !agentId ? `<button class="btn sm primary" data-act="task-start" data-id="${t.id}">▶ ${t.status === 'waiting' ? 'Start anyway' : t.status === 'failed' ? 'Retry' : 'Start'}</button>` : ''}
-      ${agentId ? `<button class="btn sm" data-act="agent-log" data-id="${agentId}">📜 Log</button><button class="btn sm danger" data-act="agent-stop" data-id="${agentId}">■ Stop</button>` : ''}
-      ${t.review?.state === 'pending' ? `<button class="btn sm primary" data-act="review-open" data-id="${t.id}">👀 Review</button>` : ''}
+      ${['ready', 'waiting', 'failed'].includes(t.status) && mine && !agentId ? `<button class="btn sm ${t.status === 'ready' ? 'primary' : ''}" data-act="task-start" data-id="${t.id}">${icon('play')}${t.status === 'waiting' ? 'Start anyway' : t.status === 'failed' ? 'Retry' : 'Start'}</button>` : ''}
+      ${agentId ? `<button class="btn sm" data-act="agent-log" data-id="${agentId}">${icon('terminal')}Log</button><button class="btn sm danger" data-act="agent-stop" data-id="${agentId}">${icon('stop')}Stop</button>` : ''}
+      ${t.review?.state === 'pending' ? `<button class="btn sm primary" data-act="review-open" data-id="${t.id}">${icon('review')}Review</button>` : ''}
       <span class="spacer"></span>
-      <button class="icon-btn" data-act="task-prio" data-id="${t.id}" data-d="-1" title="Higher priority">▲</button>
-      <button class="icon-btn" data-act="task-prio" data-id="${t.id}" data-d="1" title="Lower priority">▼</button>
-      <button class="icon-btn" data-act="task-modal" data-id="${t.id}" title="Edit">✎</button>
+      <button class="icon-btn" data-act="task-prio" data-id="${t.id}" data-d="-1" title="Higher priority">${icon('up')}</button>
+      <button class="icon-btn" data-act="task-prio" data-id="${t.id}" data-d="1" title="Lower priority">${icon('down')}</button>
+      <button class="icon-btn" data-act="task-modal" data-id="${t.id}" title="Edit">${icon('edit')}</button>
     </div>
   </div>`;
 }
@@ -301,33 +328,34 @@ function waves(list) {
 
 function viewTasks() {
   const all = tasks().filter((t) => S.showClosed || t.status !== 'cancelled').sort((a, b) => a.priority - b.priority || a.createdAt - b.createdAt);
-  if (!all.length) return `<div class="view"><div class="panel empty"><div class="emoji">📋</div><h3>No tasks yet</h3><div>Add tasks yourself, or describe a feature and let Claude split it into parallel subtasks with dependencies.</div><div class="row"><button class="btn primary" data-act="task-modal">＋ New task</button><button class="btn" data-act="plan-modal">✨ Plan a feature</button></div></div></div>`;
+  if (!all.length) return `<div class="view">${emptyState('tasks', 'No tasks yet', 'Add tasks yourself, or describe a feature and let Claude split it into parallel subtasks with dependencies.', START_ACTIONS)}</div>`;
   const ready = all.filter((t) => t.status === 'ready');
   const waiting = all.filter((t) => t.status === 'waiting');
   const running = all.filter((t) => t.status === 'running');
   const conflictsInReady = ready.filter((t) => t.parallelNotes?.some((p) => ready.some((r) => r.id === p.task) || running.some((r) => r.id === p.task)));
   const integrated = (t) => t.status === 'done' && (t.integration?.state === 'merged' || ['approved'].includes(t.review?.state) || (t.review?.state === 'none' && t.integration?.state !== 'conflicts'));
   const cols = [
-    ['⏳ Waiting on dependencies', waiting],
-    ['🟢 Ready', ready],
-    ['▶️ Running', running],
-    ['⛔ Blocked / failed', all.filter((t) => ['blocked', 'failed'].includes(t.status))],
-    ['👀 Completed — needs review', all.filter((t) => t.status === 'done' && !integrated(t))],
-    ['✅ Integrated', all.filter(integrated)],
+    ['Waiting on deps', 'clock', 'amber', waiting],
+    ['Ready', 'arrow', 'blue', ready],
+    ['Running', 'play', 'green', running],
+    ['Blocked or failed', 'block', 'red', all.filter((t) => ['blocked', 'failed'].includes(t.status))],
+    ['Needs review', 'review', 'muted', all.filter((t) => t.status === 'done' && !integrated(t))],
+    ['Integrated', 'merge', 'green', all.filter(integrated)],
   ];
-  if (S.showClosed) cols.push(['🗑️ Cancelled', all.filter((t) => t.status === 'cancelled')]);
+  if (S.showClosed) cols.push(['Cancelled', 'x', 'muted', all.filter((t) => t.status === 'cancelled')]);
   const body = S.taskMode === 'board'
-    ? `<div class="board">${cols.map(([title, list]) => `<div class="column"><div class="column-head">${title}<span class="n">${list.length}</span></div>${list.map(taskCard).join('')}</div>`).join('')}</div>`
-    : `<div class="waves">${waves(all.filter((t) => t.status !== 'cancelled')).map((w, i) => `<div class="wave"><div class="wave-head">Wave ${i + 1} · ${i === 0 ? 'no open dependencies' : `after wave ${i}`} · ${w.length} task(s) in parallel</div>${w.map(taskCard).join('')}</div>`).join('')}</div>`;
+    ? `<div class="board">${cols.map(([title, ico, tone, list]) => `<div class="column"><div class="column-head ${tone}">${icon(ico)}${title}<span class="n">${list.length}</span></div>${list.map(taskCard).join('')}</div>`).join('')}</div>`
+    : `<div class="waves">${waves(all.filter((t) => t.status !== 'cancelled')).map((w, i) => `<div class="wave"><div class="wave-head"><b>Wave ${i + 1}</b><span>${i === 0 ? 'No open dependencies' : `Starts after wave ${i}`} · ${w.length} in parallel</span></div>${w.map(taskCard).join('')}</div>`).join('')}</div>`;
+  const startable = ready.filter((t) => !t.runner || t.runner === me().id).length;
   return `<div class="view" data-scroll="tasks">
-    <div class="row wrap" style="margin-bottom:14px">
+    <div class="view-head">
       <div class="seg"><button class="${S.taskMode === 'board' ? 'on' : ''}" data-act="task-mode" data-mode="board">Board</button><button class="${S.taskMode === 'waves' ? 'on' : ''}" data-act="task-mode" data-mode="waves">Parallel plan</button></div>
-      <span class="muted small">${ready.length} can start now · ${running.length} running · ${waiting.length} waiting on dependencies</span>
+      <span class="muted small"><span class="num">${ready.length}</span> can start · <span class="num">${running.length}</span> running · <span class="num">${waiting.length}</span> waiting</span>
       <span class="spacer"></span>
-      ${ready.filter((t) => !t.runner || t.runner === me().id).length > 1 ? `<button class="btn sm" data-act="start-all-ready">▶ Start all ready (${ready.filter((t) => !t.runner || t.runner === me().id).length})</button>` : ''}
-      <label class="check small"><input type="checkbox" data-act="toggle-closed" ${S.showClosed ? 'checked' : ''}> Show cancelled</label>
+      <label class="check small muted"><input type="checkbox" data-act="toggle-closed" ${S.showClosed ? 'checked' : ''}> Show cancelled</label>
+      ${startable > 1 ? `<button class="btn sm" data-act="start-all-ready">${icon('play')}Start all ready · ${startable}</button>` : ''}
     </div>
-    ${conflictsInReady.length ? `<div class="banner warn" style="margin-bottom:14px">⚠️ ${conflictsInReady.map((t) => `"${esc(t.title)}"`).join(', ')} expect to touch the same files as other ready/running tasks. Consider running them one after another or adding a dependency.</div>` : ''}
+    ${conflictsInReady.length ? `<div class="banner warn" style="margin-bottom:16px">${icon('warn')}<span>${conflictsInReady.map((t) => `“${esc(t.title)}”`).join(', ')} expect to touch the same files as other ready or running tasks. Run them one after another, or add a dependency.</span></div>` : ''}
     ${body}
   </div>`;
 }
@@ -343,11 +371,11 @@ function matchFilter(e, f) {
 function viewActivity() {
   const q = S.activity.q.toLowerCase();
   const list = S.events.filter((e) => matchFilter(e, S.activity.filter) && (!q || (e.summary + e.actor.name + e.type).toLowerCase().includes(q))).slice(-400).reverse();
-  return `<div class="view" style="display:flex;flex-direction:column;gap:12px">
-    <div class="row wrap"><div class="seg">${FILTERS.map(([k, l]) => `<button class="${S.activity.filter === k ? 'on' : ''}" data-act="act-filter" data-f="${k}">${l}</button>`).join('')}</div><span class="spacer"></span><input id="act-q" placeholder="Search activity…" style="max-width:240px" value="${esc(S.activity.q)}"><button class="btn sm" data-act="load-delivery" title="Show which agents each event was delivered to">📬 Delivery info</button></div>
+  return `<div class="view" style="display:flex;flex-direction:column;gap:0">
+    <div class="view-head"><div class="seg">${FILTERS.map(([k, l]) => `<button class="${S.activity.filter === k ? 'on' : ''}" data-act="act-filter" data-f="${k}">${l}</button>`).join('')}</div><span class="spacer"></span><input id="act-q" placeholder="Search activity" style="max-width:220px" value="${esc(S.activity.q)}"><button class="btn sm" data-act="load-delivery" title="Show which agents each event was delivered to">${icon('inbox')}Delivery info</button></div>
     <div class="panel" style="flex:1;display:flex;flex-direction:column;min-height:0">
-      <div class="panel-body timeline" style="overflow:auto;flex:1" data-scroll="activity">${list.map((e) => eventRow(e)).join('') || '<div class="empty">No matching activity.</div>'}</div>
-      <div class="chatbar"><input id="chat-input" placeholder="Message your team… (Enter to send)"><button class="btn primary" data-act="chat-send">Send</button></div>
+      <div class="timeline" style="overflow:auto;flex:1;padding:4px 16px" data-scroll="activity">${list.map((e) => eventRow(e)).join('') || '<div class="empty">No matching activity.</div>'}</div>
+      <div class="chatbar"><input id="chat-input" placeholder="Message your team and its agents. Enter to send."><button class="btn primary" data-act="chat-send">Send</button></div>
     </div>
   </div>`;
 }
@@ -358,17 +386,18 @@ function gate(k, v, cls) { return `<div class="gate ${cls}"><span class="k">${k}
 function reviewDetail(t) {
   const d = S.review.data[t.id];
   const busy = S.review.busy;
-  const tests = { passed: ['✓ Passed', 'ok'], failed: ['✗ Failed', 'bad'], none: ['Not run', 'wait'] }[t.tests?.state || 'none'];
-  const integ = { clean: ['✓ Clean', 'ok'], conflicts: [`✗ ${t.integration.conflicts.length} conflict(s)`, 'bad'], merged: ['✓ Merged', 'ok'], reverted: ['↩ Reverted', 'wait'], none: ['Not checked', 'wait'] }[t.integration?.state || 'none'];
-  const appr = { pending: ['Pending', 'wait'], approved: ['✓ Approved', 'ok'], rejected: ['✗ Rejected', 'bad'], reverted: ['↩ Reverted', 'wait'], none: ['Not requested', 'wait'] }[t.review?.state || 'none'];
+  const ok = (s) => `${icon('check')}${s}`, bad = (s) => `${icon('x')}${s}`;
+  const tests = { passed: [ok('Passed'), 'ok'], failed: [bad('Failed'), 'bad'], none: ['Not run', 'wait'] }[t.tests?.state || 'none'];
+  const integ = { clean: [ok('Clean'), 'ok'], conflicts: [bad(`${t.integration.conflicts.length} conflict${t.integration.conflicts.length === 1 ? '' : 's'}`), 'bad'], merged: [ok('Merged'), 'ok'], reverted: [`${icon('revert')}Reverted`, 'wait'], none: ['Not checked', 'wait'] }[t.integration?.state || 'none'];
+  const appr = { pending: ['Pending', 'wait'], approved: [ok('Approved'), 'ok'], rejected: [bad('Rejected'), 'bad'], reverted: [`${icon('revert')}Reverted`, 'wait'], none: ['Not requested', 'wait'] }[t.review?.state || 'none'];
   const merged = t.integration?.state === 'merged';
   const isolated = t.mode === 'isolated' && t.branch && t.branch !== 'main';
   let diffHtml = '<div class="empty"><span class="spinner"></span></div>';
-  if (d?.error) diffHtml = `<div class="errbox">${esc(d.error)}</div>`;
-  else if (d?.kind === 'remote') diffHtml = `<div class="banner">${esc(d.message)}</div>`;
+  if (d?.error) diffHtml = `<div class="errbox">${icon('x')}<span>${esc(d.error)}</span></div>`;
+  else if (d?.kind === 'remote') diffHtml = `<div class="banner">${icon('monitor')}<span>${esc(d.message)}</span></div>`;
   else if (d?.kind === 'git') {
     const files = TCDiff.parseGitDiff(d.diff);
-    diffHtml = files.length ? files.map((f) => diffFile(f.path, f.hunks, `+${f.adds} −${f.dels}`, f.binary)).join('') : '<div class="muted">No changes on this branch.</div>';
+    diffHtml = files.length ? files.map((f) => diffFile(f.path, f.hunks, `<span class="adds">+${f.adds}</span> <span class="dels">−${f.dels}</span>`, f.binary, true)).join('') : '<div class="muted">No changes on this branch.</div>';
   } else if (d?.kind === 'shared') {
     diffHtml = d.files.length ? d.files.map((f) => {
       const hunks = f.binary ? [] : TCDiff.lineDiff(f.before, f.after);
@@ -376,56 +405,59 @@ function reviewDetail(t) {
       return diffFile(f.path, hunks, `${f.beforeVersion ? `v${f.beforeVersion}` : 'new'} → v${f.afterVersion} · ${f.lastBy}${note}`, f.binary);
     }).join('') : '<div class="muted">No file changes recorded for this task.</div>';
   }
-  return `<div class="col" style="gap:14px">
-    <div class="row"><div class="spacer"><h2>${esc(t.title)}</h2><div class="muted small">${t.assigneeName ? `by ${esc(t.assigneeName)} · ` : ''}${isolated ? `🌿 ${esc(t.branch)}` : '📁 shared working copy'}${t.review?.stats ? ` · ${t.review.stats.files} files, +${t.review.stats.insertions} −${t.review.stats.deletions}` : ''}</div></div></div>
-    <div class="gates">${gate('Task', t.status === 'done' ? '✓ Completed' : esc(TSTATUS[t.status]?.[1] || t.status), t.status === 'done' ? 'ok' : t.status === 'failed' ? 'bad' : 'wait')}${gate('Tests', tests[0], tests[1])}${gate('Integration', integ[0], integ[1])}${gate('Approval', appr[0], appr[1])}</div>
-    ${t.review?.summary || t.summary ? `<div class="panel panel-body small">${esc(t.review?.summary || t.summary)}</div>` : ''}
+  const spin = (k, ico) => (busy === k ? '<span class="spinner"></span>' : icon(ico));
+  return `<div class="col" style="gap:16px">
+    <div class="col" style="gap:4px"><h2 style="font-size:18px">${esc(t.title)}</h2><div class="meta-line">${t.assigneeName ? `<span>${icon('agent')}${esc(t.assigneeName)}</span>` : ''}${isolated ? `<span class="mono">${icon('branch')}${esc(t.branch)}</span>` : `<span>${icon('folder')}shared working copy</span>`}${t.review?.stats ? `<span class="num">${t.review.stats.files} files <span class="adds">+${t.review.stats.insertions}</span> <span class="dels">−${t.review.stats.deletions}</span></span>` : ''}</div></div>
+    <div class="gates">${gate('Task', t.status === 'done' ? ok('Completed') : esc(TSTATUS[t.status]?.[1] || t.status), t.status === 'done' ? 'ok' : t.status === 'failed' ? 'bad' : 'wait')}${gate('Tests', tests[0], tests[1])}${gate('Integration', integ[0], integ[1])}${gate('Approval', appr[0], appr[1])}</div>
+    ${t.review?.summary || t.summary ? `<div class="note">${icon('file')}<span>${esc(t.review?.summary || t.summary)}</span></div>` : ''}
     <div class="row wrap">
-      <button class="btn" data-act="rv-test" data-id="${t.id}" ${busy ? 'disabled' : ''}>${busy === 'test' ? '<span class="spinner"></span>' : '🧪'} Run tests</button>
-      <button class="btn" data-act="rv-check" data-id="${t.id}" ${busy || merged ? 'disabled' : ''}>${busy === 'check' ? '<span class="spinner"></span>' : '🔍'} Check integration</button>
-      ${!merged ? `<button class="btn primary" data-act="rv-approve" data-id="${t.id}" ${busy ? 'disabled' : ''}>${busy === 'approve' ? '<span class="spinner"></span>' : '✔'} ${isolated ? 'Approve & merge' : 'Approve'}</button>` : ''}
+      ${!merged ? `<button class="btn primary" data-act="rv-approve" data-id="${t.id}" ${busy ? 'disabled' : ''}>${spin('approve', isolated ? 'merge' : 'check')}${isolated ? 'Approve and merge' : 'Approve'}</button>` : ''}
+      <button class="btn" data-act="rv-test" data-id="${t.id}" ${busy ? 'disabled' : ''}>${spin('test', 'flask')}Run tests</button>
+      <button class="btn" data-act="rv-check" data-id="${t.id}" ${busy || merged ? 'disabled' : ''}>${spin('check', 'search')}Check integration</button>
+      ${t.integration?.state === 'conflicts' && isolated ? `<button class="btn" data-act="rv-agent-fix" data-id="${t.id}">${icon('agent')}Ask agent to resolve</button>` : ''}
+      <span class="spacer"></span>
       ${!merged && t.review?.state !== 'rejected' ? `<button class="btn danger" data-act="rv-reject" data-id="${t.id}" ${busy ? 'disabled' : ''}>Reject…</button>` : ''}
-      ${t.integration?.state === 'conflicts' && isolated ? `<button class="btn" data-act="rv-agent-fix" data-id="${t.id}">🤖 Ask agent to resolve conflicts</button>` : ''}
-      ${merged ? `<button class="btn danger" data-act="rv-revert" data-id="${t.id}">↩ Revert</button>` : ''}
-      <span class="spacer"></span><button class="btn sm ghost" data-act="rv-refresh" data-id="${t.id}">↻ Refresh diff</button>
+      ${merged ? `<button class="btn danger" data-act="rv-revert" data-id="${t.id}">${icon('revert')}Revert</button>` : ''}
+      <button class="icon-btn" data-act="rv-refresh" data-id="${t.id}" title="Refresh diff">${icon('refresh')}</button>
     </div>
-    ${t.integration?.conflicts?.length ? `<div class="errbox">Merge conflicts in: ${t.integration.conflicts.map(esc).join(', ')}</div>` : ''}
-    ${t.integration?.risks?.length ? `<div class="col">${t.integration.risks.map((r) => `<div class="warnbox">⚠️ <b>${esc(r.kind)}</b> — ${esc(r.message)}</div>`).join('')}</div>` : ''}
-    ${t.tests?.output ? `<details><summary class="muted small">Test output (${esc(t.tests.command || '')}, ${Math.round((t.tests.durationMs || 0) / 1000)}s)</summary><pre class="out">${esc(t.tests.output)}</pre></details>` : ''}
-    <div>${diffHtml}</div>
+    ${t.integration?.conflicts?.length ? `<div class="errbox">${icon('x')}<span>Merge conflicts in ${t.integration.conflicts.map((c) => `<code>${esc(c)}</code>`).join(' ')}</span></div>` : ''}
+    ${t.integration?.risks?.length ? `<div class="col" style="gap:6px">${t.integration.risks.map((r) => `<div class="warnbox">${icon('warn')}<span><b>${esc(r.kind)}</b> · ${esc(r.message)}</span></div>`).join('')}</div>` : ''}
+    ${t.tests?.output ? `<details class="more"><summary>${icon('terminal')}Test output · <span class="mono">${esc(t.tests.command || '')}</span> · ${Math.round((t.tests.durationMs || 0) / 1000)}s</summary><pre class="out" style="margin-top:8px">${esc(t.tests.output)}</pre></details>` : ''}
+    <div><h4 style="margin-bottom:8px">Changes</h4>${diffHtml}</div>
   </div>`;
 }
 
-function diffFile(p, hunks, meta, binary) {
+// `metaHtml` is trusted markup built by the caller; everything else is escaped here.
+function diffFile(p, hunks, meta, binary, metaHtml) {
   const body = binary ? '<div class="muted small" style="padding:10px 12px">Binary file</div>'
     : hunks === null ? '<div class="muted small" style="padding:10px 12px">File too large to diff here.</div>'
     : hunks.map((h) => `<div class="h">${esc(h.header)}</div>${h.lines.map((l) => `<div class="l ${l.t === '+' ? 'add' : l.t === '-' ? 'del' : 'ctx'}">${esc(l.s)}</div>`).join('')}`).join('');
-  return `<details class="diff-file" open><summary class="diff-file-head"><span class="spacer ellipsis">${esc(p)}</span><span class="faint">${esc(meta)}</span></summary><div class="diff">${body}</div></details>`;
+  return `<details class="diff-file" open><summary class="diff-file-head"><span class="spacer ellipsis">${esc(p)}</span><span class="faint">${metaHtml ? meta : esc(meta)}</span></summary><div class="diff">${body}</div></details>`;
 }
 
 function viewReview() {
   const list = tasks().filter((t) => t.review?.state !== 'none' || t.status === 'done').sort((a, b) => (a.review?.state === 'pending' ? -1 : 0) - (b.review?.state === 'pending' ? -1 : 0) || (b.completedAt || 0) - (a.completedAt || 0));
   const sel = S.review.sel && S.state.tasks[S.review.sel] ? S.state.tasks[S.review.sel] : list[0];
   if (sel && !S.review.data[sel.id] && S.review.tab === 'tasks') loadDiff(sel.id);
-  const tabs = `<div class="tabs" style="margin:0 0 0;padding:0 10px"><button class="${S.review.tab === 'tasks' ? 'on' : ''}" data-act="rv-tab" data-tab="tasks">By task</button><button class="${S.review.tab === 'all' ? 'on' : ''}" data-act="rv-tab" data-tab="all">All changes</button></div>`;
+  const tabs = `<div class="tabs" style="margin:0;padding:0 8px"><button class="${S.review.tab === 'tasks' ? 'on' : ''}" data-act="rv-tab" data-tab="tasks">By task</button><button class="${S.review.tab === 'all' ? 'on' : ''}" data-act="rv-tab" data-tab="all">All changes</button></div>`;
   if (S.review.tab === 'all') {
     const rows = [...(S.state.recentFiles || []).map((f) => ({ path: f.path, by: f.by?.name, kind: f.by?.kind, at: f.at, where: `main v${f.version}`, deleted: f.deleted })),
       ...(S.state.branchChanges || []).map((c) => ({ path: c.path, by: c.by?.name, kind: c.by?.kind, at: c.at, where: c.branch, task: c.task }))].sort((a, b) => b.at - a.at).slice(0, 300);
     const byWho = {};
     for (const r of rows) byWho[r.by] = (byWho[r.by] || 0) + 1;
     return `<div class="view"><div class="panel">${tabs}<div class="panel-body">
-      <div class="row wrap" style="margin-bottom:12px">${Object.entries(byWho).map(([n, c]) => `<span class="pill nodot">${avatar(n, 'sm round')} ${esc(n)} · ${c}</span>`).join('')}</div>
-      <table class="t"><tr><th>File</th><th>Changed by</th><th>Where</th><th>When</th></tr>${rows.map((r) => `<tr><td class="mono">${esc(r.path)}${r.deleted ? ' <span class="pill red nodot">deleted</span>' : ''}</td><td>${r.kind === 'agent' ? '🤖' : '🧑'} ${esc(r.by)}</td><td>${esc(r.where)}${r.task && S.state.tasks[r.task] ? ` · ${esc(S.state.tasks[r.task].title)}` : ''}</td><td class="faint">${ago(r.at)}</td></tr>`).join('')}</table>
+      <div class="row wrap" style="margin-bottom:12px;gap:14px">${Object.entries(byWho).map(([n, c]) => `<span class="row small" style="gap:6px">${avatar(n, 'sm')} ${esc(n)} <span class="faint num">${c}</span></span>`).join('')}</div>
+      <table class="t"><tr><th>File</th><th>Changed by</th><th>Where</th><th>When</th></tr>${rows.map((r) => `<tr><td class="mono">${esc(r.path)}${r.deleted ? ' <span class="tag red">deleted</span>' : ''}</td><td>${icon(r.kind === 'agent' ? 'agent' : 'user', 'faint')} ${esc(r.by)}</td><td>${esc(r.where)}${r.task && S.state.tasks[r.task] ? ` · ${esc(S.state.tasks[r.task].title)}` : ''}</td><td class="faint">${ago(r.at)}</td></tr>`).join('')}</table>
       ${rows.length ? '' : '<div class="empty">No changes yet.</div>'}
     </div></div></div>`;
   }
   return `<div class="view"><div class="review">
     <div class="panel">${tabs}${list.map((t) => `<div class="list-item ${sel?.id === t.id ? 'on' : ''}" data-act="rv-select" data-id="${t.id}">
       <b class="ellipsis">${esc(t.title)}</b>
-      <div class="row wrap tiny">${t.review?.state === 'pending' ? '<span class="pill blue">Needs review</span>' : t.review?.state === 'approved' ? '<span class="pill green">Approved</span>' : t.review?.state === 'rejected' ? '<span class="pill red">Rejected</span>' : '<span class="pill">No review</span>'}${t.integration?.state === 'merged' ? '<span class="pill green">Merged</span>' : t.integration?.state === 'conflicts' ? '<span class="pill red">Conflicts</span>' : ''}${t.tests?.state === 'failed' ? '<span class="pill red">Tests failing</span>' : t.tests?.state === 'passed' ? '<span class="pill green">Tests pass</span>' : ''}</div>
-      <div class="tiny muted">${esc(t.assigneeName || '')} ${t.completedAt ? '· ' + ago(t.completedAt) : ''}</div>
+      <div class="row wrap" style="gap:10px">${t.review?.state === 'pending' ? '<span class="st blue">Needs review</span>' : t.review?.state === 'approved' ? '<span class="st green">Approved</span>' : t.review?.state === 'rejected' ? '<span class="st red">Rejected</span>' : '<span class="st">No review</span>'}${t.integration?.state === 'merged' ? '<span class="tag green">Merged</span>' : t.integration?.state === 'conflicts' ? '<span class="tag red">Conflicts</span>' : ''}${t.tests?.state === 'failed' ? '<span class="tag red">Tests fail</span>' : t.tests?.state === 'passed' ? '<span class="tag green">Tests pass</span>' : ''}</div>
+      <div class="tiny faint">${esc(t.assigneeName || '')} ${t.completedAt ? '· ' + ago(t.completedAt) : ''}</div>
     </div>`).join('') || '<div class="empty small">Completed tasks show up here for review.</div>'}</div>
-    <div class="panel panel-body" data-scroll="review">${sel ? reviewDetail(sel) : '<div class="empty"><div class="emoji">👀</div>Nothing to review yet.</div>'}</div>
+    <div class="panel panel-body" data-scroll="review" style="padding:20px">${sel ? reviewDetail(sel) : `<div class="empty"><div class="ei">${icon('review')}</div><h3>Nothing to review yet</h3><div>When an agent finishes a task, its changes wait here for you.</div></div>`}</div>
   </div></div>`;
 }
 
@@ -439,30 +471,32 @@ async function loadDiff(taskId, force) {
 // ---------- Context ----------
 function viewContext() {
   const st = S.state;
-  const tabs = [['contracts', `📐 Contracts (${Object.keys(st.contracts).length})`], ['decisions', `🧭 Decisions (${st.decisions.length})`], ['blockers', `🚧 Blockers (${Object.values(st.blockers).filter((b) => b.status === 'open').length})`], ['conflicts', `⚠️ Conflicts (${Object.values(st.conflicts).filter((c) => c.status === 'open').length})`], ['notes', `💡 Notes (${st.notes.length})`], ['coordination', `🤝 Requests (${st.coordination.length})`]];
+  const tabs = [['contracts', 'braces', 'Contracts', Object.keys(st.contracts).length], ['decisions', 'compass', 'Decisions', st.decisions.length], ['blockers', 'block', 'Blockers', Object.values(st.blockers).filter((b) => b.status === 'open').length], ['conflicts', 'warn', 'Conflicts', Object.values(st.conflicts).filter((c) => c.status === 'open').length], ['notes', 'bulb', 'Notes', st.notes.length], ['coordination', 'exchange', 'Requests', st.coordination.length]];
   let body = '';
   const by = (o) => `<span class="faint tiny">${esc(o.by?.name || o.by || '')} · ${ago(o.at)}</span>`;
+  const intro = (text, btn = '') => `<div class="view-head"><span class="muted small spacer">${text}</span>${btn}</div>`;
+  const none = (text) => `<div class="empty">${text}</div>`;
   if (S.ctxTab === 'contracts') {
     const list = Object.values(st.contracts).sort((a, b) => b.at - a.at);
-    body = `<div class="row" style="margin-bottom:12px"><span class="muted small spacer">Shared interface contracts that dependent tasks build against. Agents publish them with publish_contract; you can too.</span><button class="btn primary sm" data-act="contract-modal">＋ Publish contract</button></div>
-      ${list.map((c) => `<div class="panel panel-body col" style="margin-bottom:10px"><div class="row"><b>${esc(c.name)}</b><span class="pill violet nodot">v${c.version}</span><span class="spacer"></span>${by(c)}<button class="btn sm" data-act="contract-modal" data-name="${esc(c.name)}">Edit</button></div>${c.description ? `<div class="muted small">${esc(c.description)}</div>` : ''}${c.taskId && st.tasks[c.taskId] ? `<div class="tiny muted">From task: ${esc(st.tasks[c.taskId].title)}</div>` : ''}<pre class="out">${esc(c.content)}</pre></div>`).join('') || '<div class="empty">No contracts yet.</div>'}`;
+    body = `${intro('Shared interfaces that dependent tasks build against. Agents publish them with <code>publish_contract</code>, and so can you.', `<button class="btn primary sm" data-act="contract-modal">${icon('plus')}Publish contract</button>`)}
+      ${list.map((c) => `<div class="card"><div class="row"><b class="mono">${esc(c.name)}</b><span class="tag">v${c.version}</span><span class="spacer"></span>${by(c)}<button class="btn sm" data-act="contract-modal" data-name="${esc(c.name)}">${icon('edit')}Edit</button></div>${c.description ? `<div class="muted small">${esc(c.description)}</div>` : ''}${c.taskId && st.tasks[c.taskId] ? `<div class="meta-line"><span>${icon('tasks')}${esc(st.tasks[c.taskId].title)}</span></div>` : ''}<pre class="out">${esc(c.content)}</pre></div>`).join('') || none('No contracts yet.')}`;
   } else if (S.ctxTab === 'decisions') {
-    body = `<div class="row" style="margin-bottom:12px"><span class="muted small spacer">Architectural decisions every agent is told to follow.</span><button class="btn primary sm" data-act="decision-modal">＋ Record decision</button></div>
-      ${st.decisions.slice().reverse().map((d) => `<div class="panel panel-body col" style="margin-bottom:10px"><div class="row"><b>${esc(d.title)}</b><span class="spacer"></span>${by(d)}</div><div>${esc(d.decision)}</div>${d.rationale ? `<div class="muted small">Why: ${esc(d.rationale)}</div>` : ''}</div>`).join('') || '<div class="empty">No decisions recorded.</div>'}`;
+    body = `${intro('Architectural decisions every agent is told to follow.', `<button class="btn primary sm" data-act="decision-modal">${icon('plus')}Record decision</button>`)}
+      ${st.decisions.slice().reverse().map((d) => `<div class="card"><div class="row"><b>${esc(d.title)}</b><span class="spacer"></span>${by(d)}</div><div>${esc(d.decision)}</div>${d.rationale ? `<div class="muted small">Why: ${esc(d.rationale)}</div>` : ''}</div>`).join('') || none('No decisions recorded.')}`;
   } else if (S.ctxTab === 'blockers') {
     const list = Object.values(st.blockers).sort((a, b) => (a.status === 'open' ? -1 : 1) - (b.status === 'open' ? -1 : 1) || b.at - a.at);
-    body = list.map((b) => `<div class="panel panel-body col" style="margin-bottom:10px"><div class="row">${b.status === 'open' ? '<span class="pill red">Open</span>' : '<span class="pill green">Resolved</span>'}<b class="spacer">${esc(b.description)}</b>${by(b)}</div>${b.needs ? `<div class="small">Needs: ${esc(b.needs)}</div>` : ''}${b.taskId && st.tasks[b.taskId] ? `<div class="tiny muted">Task: ${esc(st.tasks[b.taskId].title)}</div>` : ''}${b.resolution ? `<div class="okbox">${esc(b.resolution)}</div>` : ''}${b.status === 'open' ? `<div><button class="btn sm" data-act="blocker-resolve" data-id="${b.id}">Mark resolved…</button></div>` : ''}</div>`).join('') || '<div class="empty">No blockers. 🎉</div>';
+    body = list.map((b) => `<div class="card"><div class="row">${b.status === 'open' ? '<span class="st red">Open</span>' : '<span class="st green">Resolved</span>'}<span class="spacer"></span>${by(b)}</div><b>${esc(b.description)}</b>${b.needs ? `<div class="small"><span class="muted">Needs</span> ${esc(b.needs)}</div>` : ''}${b.taskId && st.tasks[b.taskId] ? `<div class="meta-line"><span>${icon('tasks')}${esc(st.tasks[b.taskId].title)}</span></div>` : ''}${b.resolution ? `<div class="okbox">${icon('check')}<span>${esc(b.resolution)}</span></div>` : ''}${b.status === 'open' ? `<div><button class="btn sm" data-act="blocker-resolve" data-id="${b.id}">Mark resolved…</button></div>` : ''}</div>`).join('') || none('No blockers.');
   } else if (S.ctxTab === 'conflicts') {
     const list = Object.values(st.conflicts).sort((a, b) => (a.status === 'open' ? -1 : 1) - (b.status === 'open' ? -1 : 1) || b.at - a.at).slice(0, 80);
     const kinds = { sync: 'Simultaneous edit', overlap: 'Agents editing same file', integration_risk: 'Same file on different branches', merge: 'Merge conflict' };
-    body = list.map((c) => `<div class="panel panel-body col" style="margin-bottom:10px"><div class="row">${c.status === 'open' ? '<span class="pill red">Open</span>' : c.status === 'watch' ? '<span class="pill amber">Watch</span>' : '<span class="pill green">Resolved</span>'}<b>${esc(kinds[c.kind] || c.kind)}</b><span class="chip">${esc(c.path || '')}</span><span class="spacer"></span><span class="faint tiny">${ago(c.at)}</span></div><div class="small">${esc(c.message)}</div>
-      ${c.status !== 'resolved' ? `<div class="row">${c.kind === 'sync' ? `<button class="btn sm primary" data-act="conflict-resolve" data-id="${c.id}">Resolve…</button>` : c.kind === 'merge' ? `<button class="btn sm" data-act="review-open" data-id="${c.taskId}">Open in Review</button>` : ''}<button class="btn sm ghost" data-act="conflict-ack" data-id="${c.id}">Acknowledge</button></div>` : c.resolution ? `<div class="tiny muted">Resolution: ${esc(c.resolution)}</div>` : ''}</div>`).join('') || '<div class="empty">No conflicts. Changes from everyone are merging cleanly.</div>';
+    body = list.map((c) => `<div class="card"><div class="row">${c.status === 'open' ? '<span class="st red">Open</span>' : c.status === 'watch' ? '<span class="st amber">Watch</span>' : '<span class="st green">Resolved</span>'}<b>${esc(kinds[c.kind] || c.kind)}</b>${c.path ? `<span class="chip">${esc(c.path)}</span>` : ''}<span class="spacer"></span><span class="faint tiny">${ago(c.at)}</span></div><div class="small">${esc(c.message)}</div>
+      ${c.status !== 'resolved' ? `<div class="row">${c.kind === 'sync' ? `<button class="btn sm primary" data-act="conflict-resolve" data-id="${c.id}">Resolve…</button>` : c.kind === 'merge' ? `<button class="btn sm" data-act="review-open" data-id="${c.taskId}">${icon('review')}Open in Review</button>` : ''}<button class="btn sm ghost" data-act="conflict-ack" data-id="${c.id}">Acknowledge</button></div>` : c.resolution ? `<div class="tiny muted">Resolution: ${esc(c.resolution)}</div>` : ''}</div>`).join('') || none('No conflicts. Everyone\'s changes are merging cleanly.');
   } else if (S.ctxTab === 'notes') {
-    body = st.notes.slice().reverse().map((n) => `<div class="panel panel-body row" style="margin-bottom:8px;align-items:flex-start"><span>${n.kind === 'error' ? '🐞' : '💡'}</span><div class="spacer"><div>${esc(n.message)}</div>${n.files?.length ? `<div class="files" style="margin-top:4px">${n.files.map((f) => `<span class="chip">${esc(f)}</span>`).join('')}</div>` : ''}</div>${by(n)}</div>`).join('') || '<div class="empty">Agents share discoveries here with publish_update.</div>';
+    body = st.notes.slice().reverse().map((n) => `<div class="card"><div class="row top">${icon(n.kind === 'error' ? 'bug' : 'bulb', 'faint')}<div class="spacer"><div>${esc(n.message)}</div>${n.files?.length ? `<div class="files" style="margin-top:6px">${n.files.map((f) => `<span class="chip">${esc(f)}</span>`).join('')}</div>` : ''}</div>${by(n)}</div></div>`).join('') || none('Agents share discoveries here with <code>publish_update</code>.');
   } else {
-    body = st.coordination.slice().reverse().map((r) => `<div class="panel panel-body col" style="margin-bottom:8px"><div class="row"><b>${esc(r.from.name)} → ${esc(r.toName || 'all agents')}</b><span class="spacer"></span><span class="faint tiny">${ago(r.at)}</span></div><div><b>${esc(r.subject)}</b> — ${esc(r.message)}</div>${r.files?.length ? `<div class="files">${r.files.map((f) => `<span class="chip">${esc(f)}</span>`).join('')}</div>` : ''}</div>`).join('') || '<div class="empty">Agents use request_coordination to agree on shared files and interfaces.</div>';
+    body = st.coordination.slice().reverse().map((r) => `<div class="card"><div class="row"><b>${esc(r.from.name)}</b>${icon('arrow', 'faint')}<b>${esc(r.toName || 'all agents')}</b><span class="spacer"></span><span class="faint tiny">${ago(r.at)}</span></div><div><b>${esc(r.subject)}</b> <span class="muted">·</span> ${esc(r.message)}</div>${r.files?.length ? `<div class="files">${r.files.map((f) => `<span class="chip">${esc(f)}</span>`).join('')}</div>` : ''}</div>`).join('') || none('Agents use <code>request_coordination</code> to agree on shared files and interfaces.');
   }
-  return `<div class="view" data-scroll="context"><div class="tabs">${tabs.map(([k, l]) => `<button class="${S.ctxTab === k ? 'on' : ''}" data-act="ctx-tab" data-tab="${k}">${l}</button>`).join('')}</div>${body}</div>`;
+  return `<div class="view" data-scroll="context"><div style="max-width:880px"><div class="tabs">${tabs.map(([k, ico, l, n]) => `<button class="${S.ctxTab === k ? 'on' : ''}" data-act="ctx-tab" data-tab="${k}">${icon(ico)}${l}<span class="n">${n}</span></button>`).join('')}</div>${body}</div></div>`;
 }
 
 // ---------- Files ----------
@@ -470,20 +504,21 @@ function viewFiles() {
   const st = S.state;
   const sync = S.sync || {};
   const res = Object.entries(st.reservations || {});
+  const conflicts = sync.conflicts?.length || 0;
   return `<div class="view" data-scroll="files">
     <div class="stats">
-      <div class="stat"><div class="n">${st.fileCount}</div><div class="l">files in workspace</div></div>
-      <div class="stat"><div class="n">${sync.up || 0}</div><div class="l">uploaded this session</div></div>
-      <div class="stat"><div class="n">${sync.down || 0}</div><div class="l">received from team</div></div>
-      <div class="stat"><div class="n">${sync.merged || 0}</div><div class="l">auto-merged edits</div></div>
-      <div class="stat"><div class="n">${sync.conflicts?.length || 0}</div><div class="l">unresolved file conflicts</div></div>
+      <div class="stat"><div class="n">${st.fileCount}</div><div class="l">Files in workspace</div></div>
+      <div class="stat"><div class="n">${sync.up || 0}</div><div class="l">Uploaded this session</div></div>
+      <div class="stat"><div class="n">${sync.down || 0}</div><div class="l">Received from team</div></div>
+      <div class="stat"><div class="n">${sync.merged || 0}</div><div class="l">Auto-merged edits</div></div>
+      <div class="stat"><div class="n ${conflicts ? 'alert' : ''}">${conflicts}</div><div class="l">Unresolved conflicts</div></div>
     </div>
     <div class="grid2">
-      <div class="panel"><div class="panel-head"><h3>🔒 Being edited right now</h3></div><div class="panel-body">${res.length ? `<table class="t"><tr><th>File</th><th>Agent</th><th>Intent</th></tr>${res.map(([p, rs]) => rs.map((r) => `<tr><td class="mono">${esc(p)}</td><td>${esc(r.agentName)} ${r.mode === 'exclusive' ? '<span class="pill amber nodot">exclusive</span>' : ''}${r.branch && r.branch !== 'main' ? `<div class="tiny faint">🌿 ${esc(r.branch)}</div>` : ''}</td><td class="small muted">${esc(r.intent || r.taskTitle || '')}</td></tr>`).join('')).join('')}</table>` : '<div class="muted small">No files reserved. Agents reserve files automatically when they edit, or explicitly with announce_edit.</div>'}</div></div>
-      <div class="panel"><div class="panel-head"><h3>🌿 Changes on agent branches</h3></div><div class="panel-body">${(st.branchChanges || []).length ? `<table class="t"><tr><th>File</th><th>By</th><th>Branch</th></tr>${st.branchChanges.slice().reverse().slice(0, 40).map((c) => `<tr><td class="mono">${esc(c.path)}</td><td>${esc(c.by?.name)}</td><td class="small">${esc(c.branch)}</td></tr>`).join('')}</table>` : '<div class="muted small">Isolated tasks work on their own branches; their edits show here until merged.</div>'}</div></div>
+      <div class="panel"><div class="panel-head">${icon('lock', 'faint')}<h3>Being edited now</h3><span class="faint num tiny">${res.length}</span></div><div class="panel-body">${res.length ? `<table class="t"><tr><th>File</th><th>Agent</th><th>Intent</th></tr>${res.map(([p, rs]) => rs.map((r) => `<tr><td class="mono">${esc(p)}</td><td>${esc(r.agentName)} ${r.mode === 'exclusive' ? '<span class="tag amber">exclusive</span>' : ''}${r.branch && r.branch !== 'main' ? `<div class="tiny faint mono">${esc(r.branch)}</div>` : ''}</td><td class="small muted">${esc(r.intent || r.taskTitle || '')}</td></tr>`).join('')).join('')}</table>` : '<div class="muted small">No files reserved. Agents reserve files when they edit, or up front with <code>announce_edit</code>.</div>'}</div></div>
+      <div class="panel"><div class="panel-head">${icon('branch', 'faint')}<h3>On agent branches</h3><span class="faint num tiny">${(st.branchChanges || []).length}</span></div><div class="panel-body">${(st.branchChanges || []).length ? `<table class="t"><tr><th>File</th><th>By</th><th>Branch</th></tr>${st.branchChanges.slice().reverse().slice(0, 40).map((c) => `<tr><td class="mono">${esc(c.path)}</td><td>${esc(c.by?.name)}</td><td class="small mono">${esc(c.branch)}</td></tr>`).join('')}</table>` : '<div class="muted small">Isolated tasks work on their own branches. Their edits show here until merged.</div>'}</div></div>
     </div>
-    <div class="panel" style="margin-top:16px"><div class="panel-head"><h3>🕘 Recently changed in the shared working copy</h3></div><div class="panel-body">
-      ${(st.recentFiles || []).length ? `<table class="t"><tr><th>File</th><th>Version</th><th>Last changed by</th><th>When</th><th></th></tr>${st.recentFiles.slice(0, 80).map((f) => `<tr><td class="mono">${esc(f.path)}${f.deleted ? ' <span class="pill red nodot">deleted</span>' : ''}</td><td>v${f.version}</td><td>${f.by?.kind === 'agent' ? '🤖' : '🧑'} ${esc(f.by?.name)}</td><td class="faint">${ago(f.at)}</td><td><button class="btn sm ghost" data-act="file-history" data-path="${esc(f.path)}">History</button></td></tr>`).join('')}</table>` : '<div class="muted small">Edits from anyone on the team appear here instantly.</div>'}
+    <div class="panel" style="margin-top:16px"><div class="panel-head">${icon('clock', 'faint')}<h3>Recently changed in the shared copy</h3></div><div class="panel-body">
+      ${(st.recentFiles || []).length ? `<table class="t"><tr><th>File</th><th>Version</th><th>Last changed by</th><th>When</th><th></th></tr>${st.recentFiles.slice(0, 80).map((f) => `<tr><td class="mono">${esc(f.path)}${f.deleted ? ' <span class="tag red">deleted</span>' : ''}</td><td class="num">v${f.version}</td><td>${icon(f.by?.kind === 'agent' ? 'agent' : 'user', 'faint')} ${esc(f.by?.name)}</td><td class="faint">${ago(f.at)}</td><td style="text-align:right"><button class="btn sm ghost" data-act="file-history" data-path="${esc(f.path)}">History</button></td></tr>`).join('')}</table>` : '<div class="muted small">Edits from anyone on the team appear here instantly.</div>'}
     </div></div>
   </div>`;
 }
@@ -494,30 +529,28 @@ function viewSettings() {
   const c = S.init.claude;
   const g = S.gitInfo;
   if (!g) api('project:gitInfo').then((x) => { S.gitInfo = x; render(); }).catch(() => { S.gitInfo = { repo: false, error: true }; });
-  return `<div class="view" data-scroll="settings"><div style="max-width:760px">
-    <div class="section"><h3>You</h3><div class="row"><input id="set-name" value="${esc(me().name)}" placeholder="Your name"><button class="btn" data-act="set-name">Save</button></div></div>
-    <div class="section"><h3>Claude Code</h3>
-      <div class="banner ${c.path ? 'ok' : 'warn'}"><div class="spacer"><b>${c.path ? esc(c.version || 'Found') : 'Not found'}</b><div class="small muted mono">${esc(c.path || 'Install with: npm i -g @anthropic-ai/claude-code')}</div></div></div>
-      <div class="row"><button class="btn" data-act="detect-claude">Detect</button><button class="btn" data-act="browse-claude">Locate…</button><button class="btn" data-act="login">Sign in to Claude Code</button></div>
-    </div>
-    <div class="section"><h3>Agents</h3>
+  const sec = (title, text, body) => `<div class="set-sec"><div><h3>${title}</h3><p>${text}</p></div><div class="col">${body}</div></div>`;
+  return `<div class="view" data-scroll="settings"><div class="settings">
+    ${sec('You', 'How your name appears to the team and in agent activity.', `<div class="row"><input id="set-name" value="${esc(me().name)}" placeholder="Your name"><button class="btn" data-act="set-name">Save</button></div>`)}
+    ${sec('Claude Code', 'The CLI TeamCode runs your agents with.', `
+      <div class="banner ${c.path ? 'ok' : 'warn'}">${icon(c.path ? 'check' : 'warn')}<div class="spacer"><b>${c.path ? esc(c.version || 'Found') : 'Not found'}</b><div class="small muted mono ellipsis">${esc(c.path || 'npm i -g @anthropic-ai/claude-code')}</div></div></div>
+      <div class="row"><button class="btn" data-act="detect-claude">Detect</button><button class="btn" data-act="browse-claude">Locate…</button><button class="btn" data-act="login">${icon('key')}Sign in</button></div>`)}
+    ${sec('Agents', 'What agents may do on this computer, and how many run at once.', `
       <label class="field">Permissions<select id="set-perm">
         <option value="acceptEdits" ${s.permissionMode === 'acceptEdits' ? 'selected' : ''}>Edit files automatically; other commands need allow-listing (recommended)</option>
-        <option value="bypassPermissions" ${s.permissionMode === 'bypassPermissions' ? 'selected' : ''}>Full auto — agents may also run commands (fastest, trust your agents)</option>
-        <option value="default" ${s.permissionMode === 'default' ? 'selected' : ''}>Cautious — only read and TeamCode tools without approval</option>
+        <option value="bypassPermissions" ${s.permissionMode === 'bypassPermissions' ? 'selected' : ''}>Full auto: agents may also run commands (fastest, trust your agents)</option>
+        <option value="default" ${s.permissionMode === 'default' ? 'selected' : ''}>Cautious: only read and TeamCode tools without approval</option>
       </select></label>
-      <div class="grid2"><label class="field">Model <span class="hint">Leave empty for your Claude Code default</span><input id="set-model" value="${esc(s.model)}" placeholder="e.g. opus or sonnet"></label>
-      <label class="field">Max agents in parallel on this computer<input id="set-max" type="number" min="1" max="10" value="${s.maxParallel}"></label></div>
-      <label class="check"><input type="checkbox" id="set-auto" ${s.autoRun ? 'checked' : ''}> Automatically start tasks marked ⚡ auto when their dependencies are done</label>
-      <div><button class="btn primary" data-act="save-settings">Save agent settings</button></div>
-    </div>
-    <div class="section"><h3>Workspace</h3>
-      <label class="field">Test command <span class="hint">Shared with the whole team — used by “Run tests” in Review</span><div class="row"><input id="set-test" value="${esc(S.state.settings.testCommand || '')}" placeholder="npm test"><button class="btn" data-act="save-test">Save</button></div></label>
-      <label class="field">Public server URL <span class="hint">Optional: if you expose your TeamCode port to the internet (router port-forward, tunnel), invites will use it</span><div class="row"><input id="set-public" value="${esc(s.publicUrl)}" placeholder="https://my-tunnel.example.com"><button class="btn" data-act="save-public">Save</button></div></label>
-    </div>
-    <div class="section"><h3>Connect another AI agent</h3><div class="muted small">Any MCP client (Claude Code in a terminal, Claude desktop, IDEs) can join this workspace with the TeamCode MCP server and hooks.</div><div><button class="btn" data-act="external-agent">Show connection settings</button></div></div>
-    <div class="section"><h3>Git</h3>${!g ? '<span class="spinner"></span>' : g.repo ? `<div class="small">Branch <b>${esc(g.branch || '(no commits)')}</b> · ${g.dirty} uncommitted file(s)</div><div class="row"><button class="btn" data-act="checkpoint">Commit working copy (checkpoint)</button></div>` : `<div class="small muted">This folder isn't a git repository. Isolated agent branches and merge review need git.</div><div><button class="btn" data-act="init-git">Initialize git repository</button></div>`}</div>
-    <div class="section"><h3>Keyboard shortcuts</h3><div class="small muted"><span class="kbd">${MOD}+N</span> new task · <span class="kbd">${MOD}+P</span> plan a feature · <span class="kbd">${MOD}+1…7</span> switch views · <span class="kbd">Esc</span> close dialogs</div></div>
+      <div class="grid2"><label class="field">Model <span class="hint">Empty uses your Claude Code default</span><input id="set-model" value="${esc(s.model)}" placeholder="e.g. opus or sonnet"></label>
+      <label class="field">Max parallel agents <span class="hint">On this computer</span><input id="set-max" type="number" min="1" max="10" value="${s.maxParallel}"></label></div>
+      <label class="check"><input type="checkbox" id="set-auto" ${s.autoRun ? 'checked' : ''}> Start tasks marked auto as soon as their dependencies are done</label>
+      <div><button class="btn primary" data-act="save-settings">Save agent settings</button></div>`)}
+    ${sec('Workspace', 'Shared with everyone on the team.', `
+      <label class="field">Test command <span class="hint">Used by Run tests in Review</span><div class="row"><input id="set-test" class="mono" value="${esc(S.state.settings.testCommand || '')}" placeholder="npm test"><button class="btn" data-act="save-test">Save</button></div></label>
+      <label class="field">Public server URL <span class="hint">If you expose your TeamCode port with a port-forward or tunnel, invites use this address</span><div class="row"><input id="set-public" value="${esc(s.publicUrl)}" placeholder="https://my-tunnel.example.com"><button class="btn" data-act="save-public">Save</button></div></label>`)}
+    ${sec('Other agents', 'Any MCP client can join this workspace: Claude Code in a terminal, Claude desktop, IDEs.', `<div><button class="btn" data-act="external-agent">${icon('link')}Show connection settings</button></div>`)}
+    ${sec('Git', 'Isolated agent branches and merge review need a git repository.', !g ? '<span class="spinner"></span>' : g.repo ? `<div class="small">On <code>${esc(g.branch || '(no commits)')}</code> · <span class="num">${g.dirty}</span> uncommitted file${g.dirty === 1 ? '' : 's'}</div><div><button class="btn" data-act="checkpoint">Commit working copy (checkpoint)</button></div>` : `<div class="small muted">This folder isn't a git repository.</div><div><button class="btn" data-act="init-git">Initialize git repository</button></div>`)}
+    ${sec('Shortcuts', '', `<div class="col small" style="gap:6px"><div class="row"><span class="kbd">${MOD} N</span><span class="muted">New task</span></div><div class="row"><span class="kbd">${MOD} P</span><span class="muted">Plan a feature</span></div><div class="row"><span class="kbd">${MOD} 1–7</span><span class="muted">Switch views</span></div><div class="row"><span class="kbd">Esc</span><span class="muted">Close dialogs</span></div></div>`)}
   </div></div>`;
 }
 
@@ -533,33 +566,33 @@ function renderDrawer() {
     const a = S.state.agents[d.id];
     const rt = S.runtime[d.id];
     const log = S.logs[d.id] || [];
-    html = `<div class="drawer"><div class="modal-head">${avatar(a?.name || '?')}<div class="spacer"><b>${esc(a?.name || 'Agent')}</b><div class="tiny muted">${esc(a?.task?.title || '')}</div></div>${a ? statusPill(a.status) : ''}${rt?.running ? `<button class="btn sm danger" data-act="agent-stop" data-id="${d.id}">■ Stop</button>` : ''}<button class="icon-btn" data-act="drawer-close">✕</button></div>
+    html = `<div class="drawer"><div class="modal-head">${avatar(a?.name || '?')}<div class="spacer"><b>${esc(a?.name || 'Agent')}</b><div class="tiny muted">${esc(a?.task?.title || '')}</div></div>${a ? statusPill(a.status) : ''}${rt?.running ? `<button class="btn sm danger" data-act="agent-stop" data-id="${d.id}">${icon('stop')}Stop</button>` : ''}<button class="icon-btn" data-act="drawer-close" title="Close">${icon('x')}</button></div>
       <div class="drawer-body" id="log-scroll"><div class="log">${log.map((e) => `<div class="e ${e.kind}">${esc(e.text)}</div>`).join('') || '<div class="muted small">No output yet.</div>'}</div></div>
-      ${rt ? `<div class="chatbar"><input id="agent-msg-input" placeholder="${rt.running ? 'Send a message to this agent (queued after its current step)…' : 'Ask a follow-up — resumes the same session…'}"><button class="btn primary" data-act="agent-send" data-id="${d.id}">Send</button></div>` : ''}</div>`;
+      ${rt ? `<div class="chatbar"><input id="agent-msg-input" placeholder="${rt.running ? 'Message this agent. It reads it after its current step.' : 'Ask a follow-up. Resumes the same session.'}"><button class="btn primary" data-act="agent-send" data-id="${d.id}">Send</button></div>` : ''}</div>`;
   } else if (d.kind === 'task') {
     const t = S.state.tasks[d.id];
     if (!t) { S.drawer = null; root.innerHTML = ''; return; }
     const evs = S.events.filter((e) => e.task === t.id).slice(-60).reverse();
     const deps = t.dependsOn.map((x) => S.state.tasks[x]).filter(Boolean);
     const dependents = tasks().filter((o) => o.dependsOn.includes(t.id));
-    html = `<div class="drawer"><div class="modal-head"><span class="prio p${t.priority}">P${t.priority}</span><b class="spacer">${esc(t.title)}</b>${taskPill(t.status)}<button class="icon-btn" data-act="drawer-close">✕</button></div>
-      <div class="drawer-body col" style="gap:14px">
+    html = `<div class="drawer"><div class="modal-head"><span class="prio p${t.priority}">P${t.priority}</span><b class="spacer ellipsis">${esc(t.title)}</b>${taskPill(t.status)}<button class="icon-btn" data-act="drawer-close" title="Close">${icon('x')}</button></div>
+      <div class="drawer-body col" style="gap:20px">
         <div style="white-space:pre-wrap">${esc(t.description) || '<span class="muted">No description.</span>'}</div>
-        <div class="row wrap small">${t.mode === 'isolated' ? `🌿 Isolated${t.branch && t.branch !== 'main' ? ` on <code>${esc(t.branch)}</code>` : ''}` : '📁 Shared working copy'} · Runs on ${esc(t.runnerName || 'any computer')} ${t.assigneeName ? `· Agent ${esc(t.assigneeName)}` : ''}</div>
-        ${t.files.length ? `<div><h4>Expected files</h4><div class="files" style="margin-top:6px">${t.files.map((f) => `<span class="chip">${esc(f)}</span>`).join('')}</div></div>` : ''}
-        ${deps.length ? `<div><h4>Depends on</h4>${deps.map((x) => `<div class="small">${x.status === 'done' ? '✅' : '⏳'} ${esc(x.title)} — ${esc(TSTATUS[x.status]?.[1] || x.status)}</div>`).join('')}</div>` : ''}
-        ${dependents.length ? `<div><h4>Unblocks</h4>${dependents.map((x) => `<div class="small">→ ${esc(x.title)}</div>`).join('')}</div>` : ''}
-        ${t.parallelNotes?.length ? `<div class="warnbox">${t.parallelNotes.map((p) => `Shares ${p.files.map(esc).join(', ')} with "${esc(p.title)}"`).join('<br>')}</div>` : ''}
-        ${t.summary ? `<div><h4>Summary</h4><div class="small">${esc(t.summary)}</div></div>` : ''}
-        ${t.error ? `<div class="errbox">${esc(t.error)}</div>` : ''}
+        <div class="meta-line">${t.mode === 'isolated' ? `<span>${icon('branch')}${t.branch && t.branch !== 'main' ? `<span class="mono">${esc(t.branch)}</span>` : 'Isolated branch'}</span>` : `<span>${icon('folder')}Shared working copy</span>`}<span>${icon('monitor')}${esc(t.runnerName || 'Any computer')}</span>${t.assigneeName ? `<span>${icon('agent')}${esc(t.assigneeName)}</span>` : ''}</div>
+        ${t.files.length ? `<div><h4>Expected files</h4><div class="files">${t.files.map((f) => `<span class="chip">${esc(f)}</span>`).join('')}</div></div>` : ''}
+        ${deps.length ? `<div><h4>Depends on</h4><div class="deps">${deps.map((x) => { const k = depKind(x, t); return `<span class="${k}">${icon(DEP_ICON[k])}<span class="spacer ellipsis" style="color:var(--text)">${esc(x.title)}</span>${taskPill(x.status)}</span>`; }).join('')}</div></div>` : ''}
+        ${dependents.length ? `<div><h4>Unblocks</h4><div class="deps">${dependents.map((x) => `<span>${icon('arrow')}${esc(x.title)}</span>`).join('')}</div></div>` : ''}
+        ${t.parallelNotes?.length ? `<div class="warnbox">${icon('warn')}<span>${t.parallelNotes.map((p) => `Shares ${p.files.map((f) => `<code>${esc(f)}</code>`).join(' ')} with “${esc(p.title)}”`).join('<br>')}</span></div>` : ''}
+        ${t.summary ? `<div><h4>Summary</h4><div>${esc(t.summary)}</div></div>` : ''}
+        ${t.error ? `<div class="errbox">${icon('x')}<span>${esc(t.error)}</span></div>` : ''}
         <div class="row wrap">
-          ${['ready', 'waiting', 'failed'].includes(t.status) && !runningAgentFor(t.id) ? `<button class="btn primary" data-act="task-start" data-id="${t.id}">▶ Start agent</button>` : ''}
-          <button class="btn" data-act="task-modal" data-id="${t.id}">✎ Edit</button>
-          ${t.status === 'done' ? `<button class="btn" data-act="review-open" data-id="${t.id}">👀 Review</button><button class="btn" data-act="task-reopen" data-id="${t.id}">Reopen</button>` : ''}
-          ${!['running', 'cancelled'].includes(t.status) ? `<button class="btn danger" data-act="task-cancel" data-id="${t.id}">Cancel task</button>` : ''}
+          ${['ready', 'waiting', 'failed'].includes(t.status) && !runningAgentFor(t.id) ? `<button class="btn primary" data-act="task-start" data-id="${t.id}">${icon('play')}Start agent</button>` : ''}
+          <button class="btn" data-act="task-modal" data-id="${t.id}">${icon('edit')}Edit</button>
+          ${t.status === 'done' ? `<button class="btn" data-act="review-open" data-id="${t.id}">${icon('review')}Review</button><button class="btn" data-act="task-reopen" data-id="${t.id}">Reopen</button>` : ''}
+          <span class="spacer"></span>${!['running', 'cancelled'].includes(t.status) ? `<button class="btn danger" data-act="task-cancel" data-id="${t.id}">Cancel task</button>` : ''}
           ${t.status === 'cancelled' ? `<button class="btn danger" data-act="task-delete" data-id="${t.id}">Delete</button>` : ''}
         </div>
-        <div><h4>History</h4><div class="timeline compact" style="margin-top:6px">${evs.map((e) => eventRow(e, { compact: true })).join('') || '<div class="muted small">No activity yet.</div>'}</div></div>
+        <div><h4>History</h4><div class="timeline compact">${evs.map((e) => eventRow(e, { compact: true })).join('') || '<div class="muted small">No activity yet.</div>'}</div></div>
       </div></div>`;
   }
   const scroller = $('#log-scroll');
@@ -579,7 +612,7 @@ function modal(html, { wide } = {}) {
   if (f) f.focus();
 }
 const closeModal = () => { $('#modal-root').innerHTML = ''; };
-const mhead = (title) => `<div class="modal-head"><h2 class="spacer">${title}</h2><button class="icon-btn" data-act="modal-close">✕</button></div>`;
+const mhead = (title, ico) => `<div class="modal-head"><h2 class="spacer">${ico ? icon(ico, 'faint') : ''}${title}</h2><button class="icon-btn" data-act="modal-close" title="Close">${icon('x')}</button></div>`;
 
 function runnerOptions(selected) {
   const users = { [me().id]: `${me().name || 'Me'} (this computer)` };
@@ -596,21 +629,21 @@ function taskModal(id) {
       <label class="field">Title<input id="tm-title" autofocus value="${esc(t?.title || '')}" placeholder="e.g. Build the track export API"></label>
       <label class="field">Description <span class="hint">Spec, acceptance criteria, interfaces it provides or uses. This is what the agent reads.</span><textarea id="tm-desc" rows="6">${esc(t?.description || '')}</textarea></label>
       <div class="grid2">
-        <label class="field">How should the agent work?<select id="tm-mode"><option value="isolated" ${t?.mode !== 'shared' ? 'selected' : ''}>🌿 Isolated branch — review & merge after (safest)</option><option value="shared" ${t?.mode === 'shared' ? 'selected' : ''}>📁 Shared working copy — changes go live instantly</option></select></label>
+        <label class="field">How should the agent work?<select id="tm-mode"><option value="isolated" ${t?.mode !== 'shared' ? 'selected' : ''}>Isolated branch: review and merge after (safest)</option><option value="shared" ${t?.mode === 'shared' ? 'selected' : ''}>Shared working copy: changes go live instantly</option></select></label>
         <label class="field">Priority<select id="tm-prio">${[0, 1, 2, 3].map((p) => `<option value="${p}" ${(t?.priority ?? 2) === p ? 'selected' : ''}>P${p}${p === 0 ? ' — urgent' : p === 3 ? ' — low' : ''}</option>`).join('')}</select></label>
       </div>
-      ${others.length ? `<label class="field">Depends on <span class="hint">The task waits until these are completed. Leave empty if it can run in parallel.</span><div class="col" style="max-height:150px;overflow:auto;border:1px solid var(--border);border-radius:8px;padding:8px">${others.map((o) => `<label class="check small"><input type="checkbox" class="tm-dep" value="${o.id}" ${t?.dependsOn.includes(o.id) ? 'checked' : ''}> ${esc(o.title)} <span class="faint">(${esc(TSTATUS[o.status]?.[1] || o.status)})</span></label>`).join('')}</div></label>` : ''}
+      ${others.length ? `<label class="field">Depends on <span class="hint">The task waits until these are completed. Leave empty if it can run in parallel.</span><div class="col" style="max-height:150px;overflow:auto;border:1px solid var(--border-2);border-radius:var(--r);padding:10px;gap:7px">${others.map((o) => `<label class="check small"><input type="checkbox" class="tm-dep" value="${o.id}" ${t?.dependsOn.includes(o.id) ? 'checked' : ''}> ${esc(o.title)} <span class="faint">(${esc(TSTATUS[o.status]?.[1] || o.status)})</span></label>`).join('')}</div></label>` : ''}
       <label class="field">Files it will likely touch <span class="hint">Optional, comma-separated. Used to warn about tasks that shouldn't run in parallel.</span><input id="tm-files" value="${esc((t?.files || []).join(', '))}" placeholder="src/editor/Track.ts, src/api/export.ts"></label>
       <div class="grid2">
         <label class="field">Run on<select id="tm-runner">${runnerOptions(t ? t.runner : me().id)}</select></label>
-        <label class="check" style="align-self:end;padding-bottom:8px"><input type="checkbox" id="tm-auto" ${t ? (t.autoStart ? 'checked' : '') : 'checked'}> ⚡ Start automatically when ready</label>
+        <label class="check" style="align-self:end;padding-bottom:8px"><input type="checkbox" id="tm-auto" ${t ? (t.autoStart ? 'checked' : '') : 'checked'}> Start automatically when ready</label>
       </div>
     </div>
-    <div class="modal-foot">${t ? '' : '<span class="muted small spacer">Tip: describe a whole feature with ✨ Plan a feature to get a parallel task breakdown.</span>'}<button class="btn" data-act="modal-close">Cancel</button><button class="btn primary" data-act="task-save" data-id="${id || ''}">${t ? 'Save' : 'Create task'}</button></div>`);
+    <div class="modal-foot">${t ? '' : `<span class="muted small spacer">Got a whole feature? Use <b>Plan a feature</b> for a parallel breakdown.</span>`}<button class="btn" data-act="modal-close">Cancel</button><button class="btn primary" data-act="task-save" data-id="${id || ''}">${t ? 'Save' : 'Create task'}</button></div>`);
 }
 
 function planModal() {
-  modal(`${mhead('✨ Plan a feature')}
+  modal(`${mhead('Plan a feature', 'plan')}
     <div class="modal-body">
       <div class="muted small">Describe what you want built. Claude reads the repository and proposes subtasks with dependencies — independent tasks run in parallel, dependent ones wait for the interfaces they need.</div>
       <textarea id="plan-text" rows="6" autofocus placeholder="e.g. Add a track editor: users can draw tracks on a canvas, save them, and export to JSON and SVG. Include tests."></textarea>
@@ -625,14 +658,14 @@ function renderPlan() {
   if (!el || !planDraft) return;
   const p = planDraft;
   el.innerHTML = `<div class="col">
-    ${p.summary ? `<div class="okbox">${esc(p.summary)}</div>` : ''}
-    ${p.tasks.map((t, i) => `<div class="panel panel-body col" style="gap:6px">
-      <div class="row"><label class="check"><input type="checkbox" class="pl-on" data-i="${i}" ${t.on !== false ? 'checked' : ''}></label><span class="pill nodot">#${i + 1}</span><input class="pl-title" data-i="${i}" value="${esc(t.title)}"><select class="pl-mode" data-i="${i}" style="width:150px"><option value="isolated" ${t.mode !== 'shared' ? 'selected' : ''}>🌿 isolated</option><option value="shared" ${t.mode === 'shared' ? 'selected' : ''}>📁 shared</option></select></div>
+    ${p.summary ? `<div class="note">${icon('plan')}<span>${esc(p.summary)}</span></div>` : ''}
+    ${p.tasks.map((t, i) => `<div class="card" style="margin:0">
+      <div class="row"><label class="check"><input type="checkbox" class="pl-on" data-i="${i}" ${t.on !== false ? 'checked' : ''}></label><span class="tag">#${i + 1}</span><input class="pl-title" data-i="${i}" value="${esc(t.title)}"><select class="pl-mode" data-i="${i}" style="width:150px"><option value="isolated" ${t.mode !== 'shared' ? 'selected' : ''}>Isolated</option><option value="shared" ${t.mode === 'shared' ? 'selected' : ''}>Shared</option></select></div>
       <textarea class="pl-desc" data-i="${i}" rows="3">${esc(t.description || '')}</textarea>
-      <div class="row wrap tiny muted">${(t.depends_on || []).length ? `Waits for: ${(t.depends_on || []).map((d) => `#${Number(d) + 1} ${esc(p.tasks[d]?.title || '')}`).join(', ')}` : '🟢 Can start immediately'}${t.contract ? ` · Contract: <b>${esc(t.contract)}</b>` : ''}${(t.files || []).length ? ` · ${t.files.slice(0, 4).map((f) => `<span class="chip">${esc(f)}</span>`).join(' ')}` : ''}</div>
+      <div class="row wrap tiny muted">${(t.depends_on || []).length ? `Waits for: ${(t.depends_on || []).map((d) => `#${Number(d) + 1} ${esc(p.tasks[d]?.title || '')}`).join(', ')}` : 'Can start immediately'}${t.contract ? ` · Contract: <b>${esc(t.contract)}</b>` : ''}${(t.files || []).length ? ` · ${t.files.slice(0, 4).map((f) => `<span class="chip">${esc(f)}</span>`).join(' ')}` : ''}</div>
     </div>`).join('')}
-    ${p.risks?.length ? `<div class="warnbox">${p.risks.map(esc).join('<br>')}</div>` : ''}
-    <label class="check"><input type="checkbox" id="plan-auto" checked> ⚡ Start agents automatically as tasks become ready</label>
+    ${p.risks?.length ? `<div class="warnbox">${icon('warn')}<span>${p.risks.map(esc).join('<br>')}</span></div>` : ''}
+    <label class="check"><input type="checkbox" id="plan-auto" checked> Start agents automatically as tasks become ready</label>
   </div>`;
   const go = $('#plan-go');
   go.textContent = 'Create these tasks';
@@ -641,11 +674,11 @@ function renderPlan() {
 }
 
 function inviteModal(info) {
-  modal(`${mhead('👥 Invite your team')}
+  modal(`${mhead('Invite your team', 'users')}
     <div class="modal-body">
-      ${info.hosted && !info.shared ? `<div class="banner"><div class="spacer"><b>Share this workspace on your network</b><div class="small muted">TeamCode will accept connections from teammates (protected by a secret token). Your OS may ask to allow network access.</div></div><button class="btn primary" data-act="invite-share">Share</button></div>` : ''}
-      ${info.codes.map((c) => `<div class="col"><b class="small">${esc(c.label)}</b><div class="row"><input readonly value="${esc(c.code)}" class="mono"><button class="btn" data-act="copy" data-text="${esc(c.code)}">Copy</button></div></div>`).join('')}
-      <div class="muted small">Teammates open TeamCode → <b>Join your team</b>, paste the code and choose a folder. Files sync both ways in real time and their Claude Code agents join the same coordination workspace.${info.hosted ? ' Keep TeamCode open on this computer while your team works — or run the standalone server (npm run server) on an always-on machine.' : ''}</div>
+      ${info.hosted && !info.shared ? `<div class="banner">${icon('link')}<div class="spacer"><b>Share this workspace on your network</b><div class="small muted">TeamCode will accept connections from teammates (protected by a secret token). Your OS may ask to allow network access.</div></div><button class="btn primary" data-act="invite-share">Share</button></div>` : ''}
+      ${info.codes.map((c) => `<div class="col"><b class="small">${esc(c.label)}</b><div class="row"><input readonly value="${esc(c.code)}" class="mono"><button class="btn" data-act="copy" data-text="${esc(c.code)}">${icon('copy')}Copy</button></div></div>`).join('')}
+      <div class="muted small">Teammates open TeamCode, choose <b>Join your team</b>, paste the code and choose a folder. Files sync both ways in real time and their Claude Code agents join the same coordination workspace.${info.hosted ? ' Keep TeamCode open on this computer while your team works, or run the standalone server (<code>npm run server</code>) on an always-on machine.' : ''}</div>
       ${info.hosted ? '<div class="muted small">Teammates outside your network? Set a Public server URL in Settings (port-forward or a tunnel such as cloudflared to port ' + esc(info.port) + ').</div>' : ''}
     </div>
     <div class="modal-foot"><button class="btn" data-act="modal-close">Done</button></div>`);
@@ -665,7 +698,7 @@ A.login = async () => {
   for (let i = 0; i < 100; i++) {
     await new Promise((r) => setTimeout(r, 3000));
     const c = await api('app:claudeStatus').catch(() => null);
-    if (c?.loggedIn) { S.init.claude = c; S.needsLogin = false; toast('Signed in to Claude Code ✓', 'ok'); render(); return; }
+    if (c?.loggedIn) { S.init.claude = c; S.needsLogin = false; toast('Signed in to Claude Code', 'ok'); render(); return; }
   }
 };
 
@@ -690,7 +723,7 @@ A['open-recent'] = async (d) => {
   S.gitInfo = null;
   render();
 };
-A['join-modal'] = () => modal(`${mhead('🤝 Join your team')}
+A['join-modal'] = () => modal(`${mhead('Join your team', 'users')}
   <div class="modal-body">
     <label class="field">Invite code<textarea id="join-code" rows="3" autofocus placeholder="tc1.…" class="mono"></textarea></label>
     <label class="field">Folder for the project files <span class="hint">An empty folder, or your existing clone of the repo (your local copies are backed up if they differ)</span><div class="row"><input id="join-folder" readonly placeholder="Choose a folder…"><button class="btn" data-act="join-pick">Browse…</button></div></label>
@@ -706,7 +739,7 @@ A['join-go'] = async (d, el) => {
   if (!r) { el.disabled = false; el.textContent = 'Join'; return; }
   closeModal(); S.project = r; S.view = 'agents'; render();
 };
-A['clone-modal'] = () => modal(`${mhead('⬇️ Clone from Git')}
+A['clone-modal'] = () => modal(`${mhead('Clone from Git', 'download')}
   <div class="modal-body">
     <label class="field">Repository URL<input id="clone-url" autofocus placeholder="https://github.com/you/your-repo.git"></label>
     <label class="field">Clone into<div class="row"><input id="clone-parent" readonly placeholder="Choose a parent folder…"><button class="btn" data-act="clone-pick">Browse…</button></div></label>
@@ -831,7 +864,7 @@ A['rv-approve'] = (d) => reviewBusy('approve', async () => {
     r = await run(() => api('review:approve', { taskId: d.id, checkpoint: true }));
   }
   if (!r) return;
-  if (r.ok) { toast('Approved and integrated ✓', 'ok'); loadDiff(d.id, true); } else if (r.conflicts) toast(`Merge has conflicts in ${r.conflicts.length} file(s) — nothing was changed. Ask the agent to resolve them.`, 'warn', 8000);
+  if (r.ok) { toast('Approved and integrated', 'ok'); loadDiff(d.id, true); } else if (r.conflicts) toast(`Merge has conflicts in ${r.conflicts.length} file(s) — nothing was changed. Ask the agent to resolve them.`, 'warn', 8000);
 });
 A['rv-reject'] = async (d) => {
   const t = S.state.tasks[d.id];
@@ -901,7 +934,7 @@ A['cf-go'] = async (d) => {
 A['file-history'] = async (d) => {
   const h = await run(() => call('fileHistory', { path: d.path }));
   if (!h) return;
-  modal(`${mhead(`History — ${esc(d.path)}`)}<div class="modal-body"><table class="t"><tr><th>Version</th><th>By</th><th>When</th><th></th></tr>${h.map((v, i) => `<tr><td>v${v.version}${v.deleted ? ' (deleted)' : ''}</td><td>${esc(v.by?.name)}</td><td class="faint">${new Date(v.at).toLocaleString()}</td><td>${i ? `<button class="btn sm" data-act="file-restore" data-path="${esc(d.path)}" data-v="${v.version}">Restore</button>` : '<span class="pill green nodot">current</span>'}</td></tr>`).join('')}</table></div>`);
+  modal(`${mhead(`History — ${esc(d.path)}`)}<div class="modal-body"><table class="t"><tr><th>Version</th><th>By</th><th>When</th><th></th></tr>${h.map((v, i) => `<tr><td class="num">v${v.version}${v.deleted ? ' (deleted)' : ''}</td><td>${esc(v.by?.name)}</td><td class="faint">${new Date(v.at).toLocaleString()}</td><td>${i ? `<button class="btn sm" data-act="file-restore" data-path="${esc(d.path)}" data-v="${v.version}">Restore</button>` : '<span class="tag green">current</span>'}</td></tr>`).join('')}</table></div>`);
 };
 A['file-restore'] = async (d) => { if (confirm(`Restore ${d.path} to v${d.v} for the whole team?`)) { const r = await run(() => call('fileRevert', { path: d.path, version: Number(d.v) }), 'Restored'); if (r) closeModal(); } };
 

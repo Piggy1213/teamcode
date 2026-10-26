@@ -65,6 +65,8 @@ async function run(win, { handlers, getSession, config }) {
     win.webContents.reload();
     await new Promise((r) => win.webContents.once('did-finish-load', r));
     await sleep(1200);
+    // Present a signed-in Claude Code and a real project name so the shots double as website screenshots.
+    await js('S.init.claude = { path: "/usr/local/bin/claude", version: "2.1.4", loggedIn: true }; S.project.name = "track-studio";');
     for (const [i, v] of ['agents', 'tasks', 'activity', 'review', 'context', 'files', 'settings'].entries()) {
       await js(`S.view = ${JSON.stringify(v)}; renderNow();`);
       await shot(`${String(i + 2).padStart(2, '0')}-${v}`);

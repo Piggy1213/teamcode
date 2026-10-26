@@ -6,11 +6,11 @@ const path = require('path');
 
 const html = `<html><body style="margin:0;background:transparent">
 <div style="width:1024px;height:1024px;display:grid;place-items:center">
-  <div style="width:824px;height:824px;border-radius:190px;background:linear-gradient(135deg,#6d4aff 0%,#4f7dff 55%,#2fb7e5 100%);display:grid;place-items:center;box-shadow:0 30px 60px rgba(40,20,120,.35);position:relative;overflow:hidden">
-    <div style="position:absolute;inset:0;background:radial-gradient(circle at 30% 20%,rgba(255,255,255,.35),transparent 55%)"></div>
-    <div style="font:800 380px/1 -apple-system,'Segoe UI',sans-serif;color:#fff;letter-spacing:-20px;position:relative">TC</div>
-    <div style="position:absolute;bottom:120px;display:flex;gap:34px">${['#fff', '#fff', '#fff'].map(() => '<div style="width:54px;height:54px;border-radius:50%;background:rgba(255,255,255,.9)"></div>').join('')}</div>
-  </div>
+  <svg width="824" height="824" viewBox="0 0 24 24" style="filter:drop-shadow(0 12px 24px rgba(0,0,0,.28))">
+    <rect width="24" height="24" rx="5.5" fill="#161615"/>
+    <path d="M7.5 6.5v11M12 6.5v6.5" stroke="#f1f0ec" stroke-width="2.3" stroke-linecap="round"/>
+    <path d="M16.5 6.5v9" stroke="#ff6a30" stroke-width="2.3" stroke-linecap="round"/>
+  </svg>
 </div></body></html>`;
 
 app.whenReady().then(async () => {

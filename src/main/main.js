@@ -258,7 +258,7 @@ for (const [channel, fn] of Object.entries(handlers)) {
 function createWindow() {
   win = new BrowserWindow({
     width: 1360, height: 860, minWidth: 980, minHeight: 640, title: 'TeamCode',
-    backgroundColor: nativeTheme.shouldUseDarkColors ? '#0f1115' : '#f6f7f9',
+    backgroundColor: nativeTheme.shouldUseDarkColors ? '#121211' : '#fbfbfa',
     titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
     autoHideMenuBar: true,
     webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false, sandbox: true },

@@ -2,13 +2,15 @@
 // TeamCode download site. Serves the landing page and hands out installers from the latest
 // GitHub release of a (private) repo: /download/<platform> redirects to a short-lived signed URL,
 // so the code stays private and downloads never stream through this server.
-//   env: PORT, GITHUB_REPO (owner/name), GITHUB_TOKEN (fine-grained, Contents: read-only)
+//   env: PORT, GITHUB_REPO (owner/name), GITHUB_TOKEN (fine-grained, Contents: read-only; only needed for a private repo)
+//   On Railway, GITHUB_REPO defaults to the repo the service deploys from.
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
 
 const PORT = Number(process.env.PORT || 3000);
-const REPO = process.env.GITHUB_REPO || 'lbakes111/teamcode';
+const RAILWAY_REPO = process.env.RAILWAY_GIT_REPO_OWNER && process.env.RAILWAY_GIT_REPO_NAME ? `${process.env.RAILWAY_GIT_REPO_OWNER}/${process.env.RAILWAY_GIT_REPO_NAME}` : '';
+const REPO = process.env.GITHUB_REPO || RAILWAY_REPO || 'lbakes111/teamcode';
 const TOKEN = process.env.GITHUB_TOKEN || '';
 const PUBLIC = path.join(__dirname, 'public');
 const CACHE_MS = 5 * 60 * 1000;
@@ -35,7 +37,7 @@ async function latestRelease() {
   if (Date.now() - cache.at < CACHE_MS) return cache;
   try {
     const r = await github(`https://api.github.com/repos/${REPO}/releases/latest`, { headers: { accept: 'application/vnd.github+json' } });
-    if (r.status === 404) cache = { at: Date.now(), release: null, error: TOKEN ? 'No release published yet' : 'GITHUB_TOKEN is not set' };
+    if (r.status === 404) cache = { at: Date.now(), release: null, error: TOKEN ? 'No release published yet' : 'No release published yet, or the repo is private and GITHUB_TOKEN is not set' };
     else if (!r.ok) cache = { at: Date.now(), release: null, error: `GitHub API returned ${r.status}` };
     else {
       const j = await r.json();
