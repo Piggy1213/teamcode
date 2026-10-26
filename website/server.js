@@ -28,7 +28,7 @@ const PLATFORMS = {
 
 function createApp({ env = process.env, db = null } = {}) {
   const railwayRepo = env.RAILWAY_GIT_REPO_OWNER && env.RAILWAY_GIT_REPO_NAME ? `${env.RAILWAY_GIT_REPO_OWNER}/${env.RAILWAY_GIT_REPO_NAME}` : '';
-  const REPO = env.GITHUB_REPO || railwayRepo || 'lbakes111/teamcode';
+  const REPO = env.GITHUB_REPO || railwayRepo || 'Piggy1213/teamcode';
   const TOKEN = env.GITHUB_TOKEN || '';
   const trustProxy = !!(env.RAILWAY_ENVIRONMENT || env.TRUST_PROXY);
   const publicOrigin = env.PUBLIC_URL ? new URL(env.PUBLIC_URL).origin : '';
@@ -45,7 +45,8 @@ function createApp({ env = process.env, db = null } = {}) {
     if (Date.now() - cache.at < CACHE_MS) return cache;
     try {
       const r = await github(`https://api.github.com/repos/${REPO}/releases/latest`, { headers: { accept: 'application/vnd.github+json' } });
-      if (r.status === 404) cache = { at: Date.now(), release: null, error: TOKEN ? 'No release published yet' : 'No release published yet, or the repo is private and GITHUB_TOKEN is not set' };
+      // GitHub answers 404 both when there is no release and when the token can't see the repo.
+      if (r.status === 404) cache = { at: Date.now(), release: null, error: TOKEN ? `No release found in ${REPO}. Either none is published, or GITHUB_TOKEN can't read that repo.` : `No release found in ${REPO}. If the repo is private, set GITHUB_TOKEN.` };
       else if (!r.ok) cache = { at: Date.now(), release: null, error: `GitHub API returned ${r.status}` };
       else {
         const j = await r.json();
