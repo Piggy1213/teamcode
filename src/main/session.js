@@ -107,6 +107,7 @@ class ProjectSession {
     const ready = Object.values(this.state.tasks)
       .filter((t) => t.status === 'ready' && t.autoStart && t.runner === this.user.id && !busy.has(t.id) && !this.starting.has(t.id))
       .filter((t) => { const a = this.autoTried.get(t.id); return !a || (this.state.seq > a.seq && !(a.failed && t.updatedAt === a.updatedAt)); })
+      .filter((t) => !this.agents.handedOffTasks().has(t.id))
       .sort((a, b) => a.priority - b.priority || a.createdAt - b.createdAt);
     for (const t of ready) {
       if (slots-- <= 0) break;
@@ -115,7 +116,8 @@ class ProjectSession {
       this.startTask(t.id).catch((e) => {
         attempt.failed = true;
         if (e.code === 'claude_setup') {
-          // Every other task would fail the same way: stop auto-starting and say so once.
+          // Not this task's fault: it may start once Claude Code works. Pause everything and say so once.
+          this.autoTried.delete(t.id);
           if (!this.autoPaused) this.send('tc:toast', { kind: 'error', text: `Agents paused. ${e.message}` });
           this.autoPaused = e.message;
         } else {
@@ -139,7 +141,7 @@ class ProjectSession {
     try {
       const r = await this.agents.startTask(taskId, opts);
       // Started by hand after a setup problem: auto-starting can carry on.
-      if (opts.manual) { this.autoPaused = null; this.autoTried.delete(taskId); }
+      if (opts.manual) { this.autoPaused = null; this.autoTried.delete(taskId); this._autoRun(); }
       return r;
     } finally { this.starting.delete(taskId); }
   }

@@ -52,9 +52,23 @@ async function connect(env = process.env) {
   if (!db) return null;
   // PGlite runs multi-statement SQL through exec(); pg runs it through a parameterless query().
   await (db.exec ? db.exec(SCHEMA) : db.query(SCHEMA));
+  const wrap = (q) => ({ query: (text, params) => q.query(text, params), async one(text, params) { return (await q.query(text, params)).rows[0] || null; } });
   return {
-    query: (text, params) => db.query(text, params),
-    async one(text, params) { return (await db.query(text, params)).rows[0] || null; },
+    ...wrap(db),
+    // Runs fn inside one transaction (pg needs a dedicated client for that; PGlite has its own API).
+    async transaction(fn) {
+      if (db.transaction) return db.transaction((tx) => fn(wrap(tx)));
+      const client = await db.connect();
+      try {
+        await client.query('begin');
+        const r = await fn(wrap(client));
+        await client.query('commit');
+        return r;
+      } catch (e) {
+        await client.query('rollback').catch(() => {});
+        throw e;
+      } finally { client.release(); }
+    },
     close: () => (db.end ? db.end() : db.close()),
   };
 }

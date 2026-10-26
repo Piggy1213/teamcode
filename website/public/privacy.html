@@ -28,12 +28,13 @@
         <li><b>Account details:</b> your name, email address, and a one-way hash of your password (scrypt). We never see or store your actual password.</li>
         <li><b>Sign-in sessions:</b> a hash of each session token, when it was created and last used, and the browser or app identifier (user agent), so you can see where you're signed in.</li>
         <li><b>App sign-in codes:</b> the short code used to sign in the desktop app. These expire after 10 minutes and are deleted once used.</li>
+        <li><b>Cloud projects:</b> if you host a project on TeamCode cloud, we store its files, earlier versions of each file, tasks, and team activity (who changed what, and when) so your team can sync. Only people with the project's invite code can reach it.</li>
         <li><b>IP addresses:</b> used briefly in server memory for rate limiting and abuse prevention. We don't store them in our database. Our hosting provider may keep standard request logs.</li>
       </ul>
 
       <h2>What we don't collect</h2>
       <ul>
-        <li><b>Your code.</b> TeamCode syncs project files between your team's computers through a workspace server your team runs. It doesn't pass through our servers.</li>
+        <li><b>Code in projects hosted on your own computer.</b> Those files sync between your team's computers through a workspace server your team runs and never reach our servers.</li>
         <li><b>Your Claude Code conversations.</b> Agents run on your own Claude Code, which talks directly to Anthropic under Anthropic's own privacy policy.</li>
         <li><b>Analytics or advertising data.</b> We don't use analytics, tracking pixels or advertising cookies.</li>
       </ul>
@@ -49,14 +50,14 @@
 
       <h2>Services we rely on</h2>
       <ul>
-        <li><b>Railway</b> hosts this website and its database.</li>
+        <li><b>Railway</b> hosts this website, its database, and cloud project files.</li>
         <li><b>GitHub</b> stores the installers. Download links send you to GitHub to fetch the file.</li>
         <li><b>Google Fonts</b> serves the website's fonts, so Google receives your IP address when pages load.</li>
       </ul>
       <p>These providers may process data in countries other than yours.</p>
 
       <h2>How long we keep it</h2>
-      <p>Account details are kept until you delete your account. Website sessions expire after 30 days and app sessions after 90 days. When you delete your account, your details and sessions are deleted straight away; copies in our hosting provider's backups expire on their normal schedule.</p>
+      <p>Account details are kept until you delete your account. Cloud project files and activity are kept until you delete the project or your account. Website sessions expire after 30 days and app sessions after 90 days. When you delete your account, your details, sessions and cloud projects are deleted straight away; copies in our hosting provider's backups expire on their normal schedule.</p>
 
       <h2>Your rights</h2>
       <p>You can see your details and delete your account from the Account page. To ask for a copy of your data, a correction, or anything else about your privacy, email <mark>[contact email]</mark>. You may also complain to your local privacy regulator.</p>

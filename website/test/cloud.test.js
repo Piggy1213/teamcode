@@ -165,3 +165,58 @@ test('end to end: a folder hosted on TeamCode cloud syncs to a teammate who join
   await b.stop();
   await a.stop();
 });
+
+test('a workspace member cannot reach Object.prototype through file paths, ids or names', async () => {
+  const eve = await account('Eve');
+  const w = (await eve('/api/workspaces', { name: 'Poison' })).data;
+  const call = (op, args) => fetch(`${w.url}/api/${w.workspace}/${op}`, { method: 'POST', headers: { authorization: `Bearer ${w.token}`, 'content-type': 'application/json' }, body: JSON.stringify(args) });
+  const attempts = [
+    ['registerAgent', { agentId: '__proto__', name: 'x' }],
+    ['registerAgent', { agentId: 'agt_ok', name: 'ok' }],
+    ['fileEdited', { agentId: 'agt_ok', path: '__proto__', hash: 'h' }],
+    ['fileEdited', { agentId: 'agt_ok', path: './constructor', hash: 'h' }],
+    ['announceEdit', { agentId: 'agt_ok', paths: ['prototype'] }],
+    ['publishContract', { agentId: 'agt_ok', name: '__proto__', content: 'x' }],
+    ['updateSettings', { settings: JSON.parse('{"__proto__":{"polluted":true}}') }],
+  ];
+  for (const [op, args] of attempts) await call(op, args);
+  const raw = await fetch(`${w.url}/api/${w.workspace}/updateSettings`, { method: 'POST', headers: { authorization: `Bearer ${w.token}`, 'content-type': 'application/json' }, body: '{"settings":{"__proto__":{"polluted":true}}}' });
+  assert.equal(raw.status, 400);
+  assert.equal({}.polluted, undefined, 'Object.prototype untouched');
+  assert.equal(typeof Object.prototype.agt_ok, 'undefined');
+  assert.equal(Object.keys(Object.prototype).length, 0);
+  // Ordinary names that merely contain those words still work.
+  assert.equal((await call('fileEdited', { agentId: 'agt_ok', path: 'src/constructor/index.js', hash: 'h' })).status, 200);
+});
+
+test('the team API checks the token before reading a request body, and idle sockets must say hello', async () => {
+  const fin = await account('Finn');
+  const w = (await fin('/api/workspaces', { name: 'Gate' })).data;
+  const started = Date.now();
+  const r = await fetch(`${w.url}/api/${w.workspace}/snapshot`, { method: 'POST', headers: { authorization: 'Bearer wrong', 'content-length': String(50 * 1024 * 1024) }, body: Buffer.alloc(64 * 1024), duplex: 'half' }).catch((e) => ({ status: 'socket-closed', e }));
+  assert.ok(r.status === 401 || r.status === 'socket-closed', String(r.status));
+  assert.ok(Date.now() - started < 3000, 'answered without waiting for the body');
+
+  const ws = new WebSocket(`${w.url.replace(/^http/, 'ws')}/ws`);
+  await new Promise((res, rej) => { ws.on('open', res); ws.on('error', rej); });
+  const closedAt = await new Promise((res) => ws.on('close', () => res(Date.now())));
+  assert.ok(closedAt - started < 15000, 'a socket that never says hello is dropped');
+});
+
+test('hosted projects are capped in size and file count', async () => {
+  const lim = createApp({ env: { NODE_ENV: 'test', TEAMCODE_DATA: fs.mkdtempSync(path.join(os.tmpdir(), 'tc-lim-')), TEAMCODE_MAX_PROJECT_FILES: '3', TEAMCODE_MAX_PROJECT_MB: '1', TRUST_PROXY: '1' }, db });
+  const W = lim.team.coordinator.ensureWorkspace('limits-test', { name: 'L' });
+  const put = (p, bytes) => W.call('filePut', { path: p, baseVersion: 0, contentB64: Buffer.alloc(bytes, p).toString('base64') }, { user: { id: 'u', name: 'U' } });
+  put('a.txt', 10); put('b.txt', 10); put('c.txt', 10);
+  assert.throws(() => put('d.txt', 10), /file limit \(3\)/);
+  // Updating an existing file is fine until the project's stored bytes would pass 1 MB.
+  W.call('filePut', { path: 'a.txt', baseVersion: 1, contentB64: Buffer.alloc(600 * 1024, 1).toString('base64') }, { user: { id: 'u', name: 'U' } });
+  assert.throws(() => W.call('filePut', { path: 'a.txt', baseVersion: 2, contentB64: Buffer.alloc(600 * 1024, 2).toString('base64') }, { user: { id: 'u', name: 'U' } }), /storage limit \(1 MB\)/);
+  await lim.close();
+});
+
+test('parallel project creation cannot exceed the per-account cap', async () => {
+  const gus = await account('Gus');
+  const results = await Promise.all([1, 2, 3, 4, 5].map((i) => gus('/api/workspaces', { name: `P${i}` })));
+  assert.equal(results.filter((r) => r.status === 201).length, 2, results.map((r) => r.status).join(','));
+});

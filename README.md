@@ -35,6 +35,19 @@ You can install Claude Code with `npm i -g @anthropic-ai/claude-code`. TeamCode 
 
 Shortcuts: `Ctrl/⌘+N` creates a new task, `Ctrl/⌘+P` plans a feature, `Ctrl/⌘+1…7` switches views, and `Esc` closes dialogs.
 
+### Hosting: TeamCode cloud or this computer
+
+When you open a folder, TeamCode asks where its team workspace should run:
+
+- **TeamCode cloud** (needs a TeamCode account): the workspace lives on the TeamCode website, so teammates can join from anywhere and keep working when your computer is off. Your files upload on the first sync. Your cloud projects are listed on the welcome screen of any computer you sign in on.
+- **This computer**: the workspace runs inside TeamCode on your machine, as before.
+
+### Use TeamCode from Claude Code
+
+**Settings → Claude Code → Add to Claude Code** registers TeamCode as an MCP server for the project folder (`claude mcp add-json teamcode … --scope local`) and adds its hooks to `.claude/settings.local.json`, which TeamCode never syncs to teammates. Your own Claude Code sessions in that folder can then see the team (`team_status`), plan work (`create_tasks` with `start_on_my_computer`), and start agents (`start_task`), which the TeamCode app launches on your computer. The connection details live in a private file in TeamCode's data folder, not in the project or in Claude Code's config.
+
+Any agent TeamCode starts can also be handed to an interactive Claude Code window: open its chat and press **Open in Claude Code**. The same conversation resumes there with the same team tools; press **Send for review** when it's done.
+
 ### Teams on different networks
 
 The host's TeamCode runs the shared workspace server on port **4477**. Teammates can reach it in three ways:
@@ -241,12 +254,13 @@ scripts/       smoke test, icon generator
    - `DATABASE_URL` = `${{Postgres.DATABASE_URL}}` (Railway fills it in from the database)
    - `GITHUB_TOKEN` = a fine-grained token with read-only Contents access to this repo (needed while the repo is private)
    - `PUBLIC_URL` = your site's address, e.g. `https://teamcode-production.up.railway.app` (optional, tightens the cross-site check)
-5. Put the same address in `teamcode.siteUrl` in `package.json` so app builds use it for updates and sign-in.
-6. Fill in the `[Business name]`, `[contact email]` and governing-law placeholders in `website/public/terms.html` and `privacy.html`, and have someone qualified review them.
+5. For **TeamCode cloud** (team workspaces hosted on the site, so teams keep working when the host's computer is off): right-click the website service → **Attach Volume**, mount path `/data`. Railway sets `RAILWAY_VOLUME_MOUNT_PATH` and the site stores workspaces in `/data/workspaces`. Without a volume, cloud hosting stays off (a redeploy would otherwise wipe every workspace). `TEAMCODE_MAX_PROJECTS` caps cloud projects per account (default 5).
+6. Put the same address in `teamcode.siteUrl` in `package.json` so app builds use it for updates, sign-in and cloud hosting.
+7. Fill in the `[contact email]` and governing-law placeholders in `website/public/terms.html` and `privacy.html`, and have someone qualified review them.
 
 Railway only lists repos its GitHub app can see. If this repo doesn't show up, install the Railway app on the account that owns the repo (github.com/apps/railway-app → Configure) and give it access.
 
 | Service | Railway config file | Variables |
 | --- | --- | --- |
-| Website | `railway.json` (default) | `DATABASE_URL`, `GITHUB_TOKEN` if the repo is private; optional `PUBLIC_URL`, `GITHUB_REPO` |
-| Team workspace server (optional, for remote teams) | set **Settings → Config-as-code → Railway config file** to `server/railway.json` | `TEAMCODE_WORKSPACE`, `TEAMCODE_NAME`, `TEAMCODE_TOKEN` (random secret), plus a volume mounted at `/data`. The invite code is printed in the deploy logs. |
+| Website (also hosts TeamCode cloud workspaces at `/team`) | `railway.json` (default) | `DATABASE_URL`, a volume at `/data` for cloud hosting, `GITHUB_TOKEN` if the repo is private; optional `PUBLIC_URL`, `GITHUB_REPO`, `TEAMCODE_MAX_PROJECTS` |
+| Standalone team workspace server (alternative to TeamCode cloud) | set **Settings → Config-as-code → Railway config file** to `server/railway.json` | `TEAMCODE_WORKSPACE`, `TEAMCODE_NAME`, `TEAMCODE_TOKEN` (random secret), plus a volume mounted at `/data`. The invite code is printed in the deploy logs. |

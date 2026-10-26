@@ -130,7 +130,7 @@ function shellQuote(args) {
 function claudeVersion(cliPath) {
   return new Promise((resolve) => {
     const spec = spawnSpec(cliPath, findNode());
-    execFile(spec.command, [...spec.prefix, '--version'], { timeout: 15000, windowsHide: true, shell: !!spec.shell }, (err, stdout) => {
+    execFile(spec.shell ? `"${spec.command}"` : spec.command, [...spec.prefix, '--version'], { timeout: 15000, windowsHide: true, shell: !!spec.shell }, (err, stdout) => {
       resolve(err ? null : String(stdout).trim().split('\n')[0]);
     });
   });
@@ -166,7 +166,7 @@ function loginScript(cliPath, dir) {
 function claudeAuthStatus(cliPath) {
   return new Promise((resolve) => {
     const spec = spawnSpec(cliPath, findNode());
-    execFile(spec.command, [...spec.prefix, 'auth', 'status'], { timeout: 20000, windowsHide: true, shell: !!spec.shell }, (err, stdout) => {
+    execFile(spec.shell ? `"${spec.command}"` : spec.command, [...spec.prefix, 'auth', 'status'], { timeout: 20000, windowsHide: true, shell: !!spec.shell }, (err, stdout) => {
       try { resolve(JSON.parse(String(stdout))); } catch { resolve(null); }
     });
   });

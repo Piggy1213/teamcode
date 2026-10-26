@@ -26,11 +26,15 @@ class Workspaces {
   async create(user, { name }, base) {
     const n = String(name || '').replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 60);
     if (!n) throw new HttpError(400, 'Give the project a name');
-    const { rows } = await this.db.query('select count(*)::int as n from workspaces where owner_id = $1', [user.id]);
-    if (rows[0].n >= this.maxPerUser) throw new HttpError(403, `You can host up to ${this.maxPerUser} projects on TeamCode cloud. Delete one first.`);
     const id = `${slug(n)}-${crypto.randomBytes(4).toString('hex')}`;
-    // Record ownership first, so a failure can't leave an unowned workspace on the volume.
-    await this.db.query('insert into workspaces (id, owner_id, name) values ($1, $2, $3)', [id, user.id, n]);
+    // Count and insert under a lock on the account row, so parallel requests can't exceed the cap.
+    // Ownership is recorded before the files exist, so a failure can't leave an unowned workspace behind.
+    await this.db.transaction(async (tx) => {
+      await tx.query('select id from users where id = $1 for update', [user.id]);
+      const { rows } = await tx.query('select count(*)::int as n from workspaces where owner_id = $1', [user.id]);
+      if (rows[0].n >= this.maxPerUser) throw new HttpError(403, `You can host up to ${this.maxPerUser} projects on TeamCode cloud. Delete one first.`);
+      await tx.query('insert into workspaces (id, owner_id, name) values ($1, $2, $3)', [id, user.id, n]);
+    });
     try {
       this.team.coordinator.ensureWorkspace(id, { name: n, token: crypto.randomBytes(24).toString('hex') });
     } catch (e) {

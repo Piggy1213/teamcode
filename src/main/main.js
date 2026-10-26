@@ -106,7 +106,9 @@ async function openSession(project) {
   saveConfig();
   session = new ProjectSession({ project, user: config.user, getSettings, send, dataDir: userData, scripts, notify });
   await session.start();
-  claudeCodeLink(session); // the local server's port can change between runs; keep Claude Code's connection current
+  const link = claudeCodeLink(session); // the local server's port can change between runs; keep Claude Code's connection current
+  // If TeamCode or node moved since "Add to Claude Code", point Claude Code at the new paths.
+  if (project.claudeLinked && project.claudeLinkedServer !== JSON.stringify(link.server)) linkClaudeCode(session).catch(() => {});
   win?.setTitle(`${project.name} | TeamCode`);
   return projectView(project);
 }
@@ -167,8 +169,30 @@ function writeClaudeHooks(root, hookCmd) {
   fs.writeFileSync(f, JSON.stringify(j, null, 2) + '\n');
 }
 
+// Keeps a TeamCode-created .claude/settings.local.json out of git (Claude Code does the same for its own).
+function gitExclude(root, rel) {
+  const f = path.join(root, '.git', 'info', 'exclude');
+  if (!fs.existsSync(path.join(root, '.git'))) return;
+  let cur = '';
+  try { cur = fs.readFileSync(f, 'utf8'); } catch { /* no exclude file yet */ }
+  if (cur.split(/\r?\n/).includes(rel)) return;
+  fs.mkdirSync(path.dirname(f), { recursive: true });
+  fs.appendFileSync(f, `${cur && !cur.endsWith('\n') ? '\n' : ''}${rel}\n`);
+}
+
+async function linkClaudeCode(s) {
+  const link = claudeCodeLink(s);
+  await claudeCli(['mcp', 'remove', 'teamcode', '--scope', 'local'], s.project.root).catch(() => {});
+  await claudeCli(['mcp', 'add-json', 'teamcode', JSON.stringify(link.server), '--scope', 'local'], s.project.root);
+  writeClaudeHooks(s.project.root, link.hookCmd);
+  gitExclude(s.project.root, '.claude/settings.local.json');
+  s.project.claudeLinked = true;
+  s.project.claudeLinkedServer = JSON.stringify(link.server);
+  saveConfig();
+}
+
 // Runs the Claude Code CLI (e.g. `claude mcp add-json ...`) in the project folder.
-function claudeCli(args, cwd) {
+async function claudeCli(args, cwd) {
   const cli = config.settings.claudePath;
   if (!cli || !isRunnable(cli) || isDesktopApp(cli)) throw new Error('Claude Code isn\'t set up. Open Settings, Claude Code, and press Detect.');
   const spec = spawnSpec(cli, findNode());
@@ -180,8 +204,6 @@ function claudeCli(args, cwd) {
     });
   });
 }
-
-const shq = (v) => `'${String(v).replace(/'/g, `'\\''`)}'`;
 
 // ---------- IPC ----------
 const handlers = {
@@ -268,7 +290,10 @@ const handlers = {
   'cloud:list': async () => {
     if (!account.state.user) return [];
     const list = await account.listWorkspaces();
-    return list.map((w) => ({ ...w, token: undefined, open: config.projects.find((p) => p.workspace === w.workspace)?.root || null }));
+    return list.map((w) => {
+      const p = config.projects.find((x) => x.workspace === w.workspace && fs.existsSync(x.root));
+      return { ...w, token: undefined, open: p ? p.root : null };
+    });
   },
   // Host a folder on TeamCode cloud: create the workspace on the website, then connect as its first member.
   // An empty cloud workspace takes the folder's files on first sync.
@@ -328,25 +353,18 @@ const handlers = {
     const hooks = { hooks: Object.fromEntries(HOOK_EVENTS.map((ev) => [ev, [{ ...(ev === 'PreToolUse' ? { matcher: 'Edit|Write|MultiEdit|NotebookEdit' } : ev === 'PostToolUse' ? { matcher: '.*' } : {}), hooks: [{ type: 'command', command: link.hookCmd, timeout: 10 }] }]])) };
     return {
       linked: !!s.project.claudeLinked, root: s.project.root, local: s.project.role === 'host',
-      command: `claude mcp add-json teamcode ${shq(JSON.stringify(link.server))} --scope local`,
+      // No embedded JSON, so the same command works in cmd, PowerShell and POSIX shells.
+      command: `claude mcp add --scope local${link.server.env ? ' -e ELECTRON_RUN_AS_NODE=1' : ''} teamcode -- ${[link.server.command, ...link.server.args].map((a) => `"${a}"`).join(' ')}`,
       server: JSON.stringify(link.server, null, 2), hooks: JSON.stringify(hooks, null, 2),
     };
   },
-  'claude:link': async () => {
-    const s = requireSession();
-    const link = claudeCodeLink(s);
-    await claudeCli(['mcp', 'remove', 'teamcode', '--scope', 'local'], s.project.root).catch(() => {});
-    await claudeCli(['mcp', 'add-json', 'teamcode', JSON.stringify(link.server), '--scope', 'local'], s.project.root);
-    writeClaudeHooks(s.project.root, link.hookCmd);
-    s.project.claudeLinked = true;
-    saveConfig();
-    return true;
-  },
+  'claude:link': async () => { await linkClaudeCode(requireSession()); return true; },
   'claude:unlink': async () => {
     const s = requireSession();
     await claudeCli(['mcp', 'remove', 'teamcode', '--scope', 'local'], s.project.root).catch(() => {});
     writeClaudeHooks(s.project.root, null);
     s.project.claudeLinked = false;
+    delete s.project.claudeLinkedServer;
     saveConfig();
     return true;
   },
@@ -358,12 +376,10 @@ const handlers = {
   'ws:state': () => ({ state: session?.state || null, events: session?.events || [], presence: session?.presence || [], runtime: session?.agents?.runtime() || {}, status: session?.conn?.status || 'offline', sync: session?.sync ? { ...session.sync.stats, ready: session.sync.ready, conflicts: [...session.sync.conflicts.keys()] } : null }),
 
   'agent:start': ({ taskId }) => requireSession().startTask(taskId, { manual: true }),
-  'agent:openInClaudeCode': async ({ agentId }) => {
-    const f = await requireSession().agents.openInClaudeCode(agentId);
+  'agent:openInClaudeCode': ({ agentId }) => requireSession().agents.openInClaudeCode(agentId, async (f) => {
     const err = await shell.openPath(f);
-    if (err) throw new Error(err);
-    return true;
-  },
+    if (err) throw new Error(`Couldn't open a terminal: ${err}`);
+  }),
   'agent:finishHandoff': ({ agentId }) => requireSession().agents.finishHandoff(agentId),
   'agent:stop': ({ agentId }) => requireSession().agents.stop(agentId),
   'agent:message': ({ agentId, text }) => requireSession().agents.message(agentId, text),

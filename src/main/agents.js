@@ -30,7 +30,25 @@ class AgentManager extends EventEmitter {
     this.logs = new Map();
     this.metaFile = path.join(dataDir, 'agents.json');
     try { this.meta = JSON.parse(fs.readFileSync(this.metaFile, 'utf8')); } catch { this.meta = {}; }
+    this.handoffBeats = new Map();
+    for (const m of Object.values(this.meta)) if (m.handedOff) this._keepAlive(m.agentId);
   }
+
+  // While an agent continues in Claude Code, this app keeps it marked alive so the server never treats
+  // it as gone and hands its task to a new agent (which would replace its worktree).
+  _keepAlive(agentId) {
+    if (this.handoffBeats.has(agentId)) return;
+    const beat = () => this.conn.call('heartbeat', { agentId }).catch(() => {});
+    beat();
+    this.handoffBeats.set(agentId, setInterval(beat, 20000));
+  }
+
+  _stopKeepAlive(agentId) {
+    clearInterval(this.handoffBeats.get(agentId));
+    this.handoffBeats.delete(agentId);
+  }
+
+  handedOffTasks() { return new Set(Object.values(this.meta).filter((m) => m.handedOff).map((m) => m.taskId)); }
 
   _saveMeta() {
     fs.mkdirSync(this.dataDir, { recursive: true });
@@ -77,6 +95,7 @@ class AgentManager extends EventEmitter {
 
   // manual: started by a person (Start / Retry), which may restart a failed or finished task.
   async startTask(taskId, { manual = false } = {}) {
+    if (this.handedOffTasks().has(taskId)) throw new Error('This task is being worked on in Claude Code. Send it for review first.');
     await this.checkClaude();
     const task = this.getState()?.tasks?.[taskId];
     if (!task) throw new Error('Task not found');
@@ -242,6 +261,7 @@ class AgentManager extends EventEmitter {
     const m = this.meta[agentId];
     if (msg.type === 'system' && msg.subtype === 'init') {
       m.sessionId = msg.session_id; m.model = msg.model; this._saveMeta();
+      this.emit('runtime'); // the renderer offers Open in Claude Code once there is a session
       const tc = (msg.mcp_servers || []).find((s) => s.name === 'teamcode');
       this.log(agentId, 'system', `Session started (${msg.model || 'Claude'})${tc ? `, teamcode MCP ${tc.status}` : ''}`);
       return;
@@ -317,7 +337,8 @@ class AgentManager extends EventEmitter {
         await this.conn.call('agentExited', { agentId, outcome: 'error', detail: clip(error, 200) }).catch(() => {});
       }
     } finally {
-      this.running.delete(agentId);
+      // A follow-up may already have resumed this agent under the same id; don't drop that new run.
+      if (this.running.get(agentId) === run) this.running.delete(agentId);
       this.emit('runtime');
       this.emit('finished', agentId);
     }
@@ -345,7 +366,8 @@ class AgentManager extends EventEmitter {
 
   async message(agentId, text) {
     if (this.meta[agentId]?.handedOff) throw new Error('This agent is continuing in Claude Code. Message it there.');
-    const live = this.running.get(agentId);
+    let live = this.running.get(agentId);
+    if (live?.exited) { await live.done; live = this.running.get(agentId); }
     if (live && !live.exited) {
       this.log(agentId, 'user', text);
       this._send(agentId, text);
@@ -373,47 +395,76 @@ class AgentManager extends EventEmitter {
   stopAll() { for (const id of this.running.keys()) this.stop(id); }
 
   // Hands an agent's conversation to an interactive Claude Code window (Terminal on Mac, a console on
-  // Windows). The background run stops, the same session resumes with the same team tools and hooks,
-  // and the task stays assigned to this agent until the person presses Send for review.
-  async openInClaudeCode(agentId) {
+  // Windows). The background run stops, the same session resumes with the same team tools and hooks, and
+  // the task stays with this agent (kept alive, never auto-restarted) until the person presses Send for review.
+  // `open` launches the script; the handoff only counts once it succeeds.
+  async openInClaudeCode(agentId, open) {
     const m = this.meta[agentId];
     if (!m) throw new Error('This agent was not started on this computer');
+    if (m.handedOff) throw new Error('This agent is already continuing in Claude Code');
     if (!isWin && process.platform !== 'darwin') throw new Error('Open in Claude Code works on Mac and Windows');
     await this.checkClaude();
     if (!m.sessionId) throw new Error('This agent has no conversation yet. Wait until it has started, then try again.');
+    if (!fs.existsSync(m.cwd)) throw new Error(`This agent's folder no longer exists (${m.cwd}).`);
+    const task = (await this.conn.call('snapshot').catch(() => null))?.tasks?.[m.taskId] || this.getState()?.tasks?.[m.taskId];
+    if (task && ['done', 'cancelled'].includes(task.status)) throw new Error('This task is already finished.');
+
     const run = this.running.get(agentId);
-    if (run && !run.exited) {
+    if (run?.exited) await run.done;
+    else if (run) {
       run.handoff = true;
       killTree(run.child);
       await Promise.race([run.done, new Promise((r) => setTimeout(r, 10000))]);
     }
-    m.handedOff = true;
-    this._saveMeta();
+    // A failed or stopped agent takes its task back first, the same way a follow-up message does.
+    if (!task || !['running', 'blocked'].includes(task.status)) {
+      await this.conn.call('registerAgent', { agentId, name: m.name, client: 'Claude Code', taskId: m.taskId, userId: this.user.id, mode: m.mode, branch: m.branch, cwd: m.cwd });
+      await this.conn.call('startTask', { taskId: m.taskId, agentId, branch: m.branch, worktree: m.worktree, baseCommit: m.baseCommit, force: true });
+    }
     const settings = this.getSettings();
     const { mcpFile, settingsFile, env } = this._files(agentId, m);
     const args = ['--resume', m.sessionId, '--mcp-config', mcpFile, '--settings', settingsFile, '--permission-mode', settings.permissionMode || 'acceptEdits'];
     if (settings.model) args.push('--model', settings.model);
     const spec = spawnSpec(settings.claudePath, findNode());
     const file = terminalScript(path.join(this.dataDir, 'scripts'), agentId, m.cwd, env, [spec.command, ...spec.prefix, ...args]);
+    try {
+      await open(file);
+    } catch (e) {
+      fs.rmSync(file, { force: true });
+      // Couldn't open a window: release the task like a Stop would.
+      await this.conn.call('agentExited', { agentId, outcome: 'stopped' }).catch(() => {});
+      await this.conn.call('updateTask', { taskId: m.taskId, autoStart: false }).catch(() => {});
+      await this.conn.call('reopenTask', { taskId: m.taskId }).catch(() => {});
+      this.emit('runtime');
+      throw e;
+    }
+    m.handedOff = true;
+    this._saveMeta();
+    await this.conn.call('updateTask', { taskId: m.taskId, autoStart: false }).catch(() => {});
+    this._keepAlive(agentId);
     this.log(agentId, 'system', 'Opened in Claude Code');
     this.emit('runtime');
-    return file;
+    return true;
   }
 
   // The person is done with a handed-off agent: record completion and send its changes for review.
   async finishHandoff(agentId) {
     const m = this.meta[agentId];
     if (!m?.handedOff) throw new Error('This agent is not in Claude Code');
-    const task = this.getState()?.tasks?.[m.taskId];
-    const summary = clip(task?.summary || 'Finished in Claude Code', 1200);
-    if (task && ['running', 'blocked'].includes(task.status)) await this.conn.call('completeTask', { agentId, taskId: m.taskId, summary });
-    await this._requestReview(agentId, m, task, summary);
-    await this.conn.call('agentExited', { agentId, outcome: 'done' }).catch(() => {});
-    m.handedOff = false;
-    m.finishedAt = Date.now();
-    this._saveMeta();
-    this.log(agentId, 'system', 'Finished in Claude Code. Changes sent for review.');
-    this.emit('runtime');
+    try {
+      const task = (await this.conn.call('snapshot').catch(() => null))?.tasks?.[m.taskId] || this.getState()?.tasks?.[m.taskId];
+      const summary = clip(task?.summary || 'Finished in Claude Code', 1200);
+      if (task && !['done', 'cancelled'].includes(task.status)) await this.conn.call('completeTask', { agentId, taskId: m.taskId, summary });
+      await this._requestReview(agentId, m, task, summary);
+      await this.conn.call('agentExited', { agentId, outcome: 'done' }).catch(() => {});
+      this.log(agentId, 'system', 'Finished in Claude Code. Changes sent for review.');
+    } finally {
+      m.handedOff = false;
+      m.finishedAt = Date.now();
+      this._saveMeta();
+      this._stopKeepAlive(agentId);
+      this.emit('runtime');
+    }
     return true;
   }
 
@@ -518,7 +569,10 @@ function terminalScript(dir, agentId, cwd, env, cmd) {
   if (isWin) {
     const f = path.join(dir, `claude-${agentId}.cmd`);
     const sets = Object.entries(env).map(([k, v]) => `set "${k}=${String(v).replace(/"/g, '')}"`).join('\r\n');
-    fs.writeFileSync(f, `@echo off\r\ntitle TeamCode agent\r\n${sets}\r\ncd /d "${cwd}"\r\n${[`"${cmd[0]}"`, ...shellQuote(cmd.slice(1))].join(' ')}\r\n(goto) 2>nul & del "%~f0"\r\n`, { mode: 0o600 });
+    // chcp 65001: read the rest of this UTF-8 file correctly (folder names with non-ASCII characters).
+    // `call` returns here after a .cmd shim, so the script can still delete itself.
+    const run = `${/\.(cmd|bat)$/i.test(cmd[0]) ? 'call ' : ''}${[`"${cmd[0]}"`, ...shellQuote(cmd.slice(1))].join(' ')}`;
+    fs.writeFileSync(f, `@echo off\r\nchcp 65001>nul\r\ntitle TeamCode agent\r\n${sets}\r\ncd /d "${cwd}" || exit /b 1\r\n${run}\r\n(goto) 2>nul & del "%~f0"\r\n`, { mode: 0o600 });
     return f;
   }
   const sq = (v) => `'${String(v).replace(/'/g, `'\\''`)}'`;

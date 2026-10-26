@@ -628,7 +628,8 @@ function renderDrawer() {
     const a = S.state.agents[d.id];
     const rt = S.runtime[d.id];
     const log = S.logs[d.id] || [];
-    const canHandOff = rt && rt.sessionId && !rt.handedOff && window.tc.platform !== 'linux';
+    const agentTask = S.state.tasks[rt?.taskId];
+    const canHandOff = rt && rt.sessionId && !rt.handedOff && window.tc.platform !== 'linux' && agentTask && !['done', 'cancelled'].includes(agentTask.status);
     html = `<div class="drawer"><div class="modal-head">${avatar(a?.name || '?')}<div class="spacer"><b>${esc(a?.name || 'Agent')}</b><div class="tiny muted">${esc(a?.task?.title || '')}</div></div>${a ? statusPill(a.status) : ''}${canHandOff ? `<button class="btn sm" data-act="agent-open-cc" data-id="${d.id}" title="Continue this conversation in a Claude Code window">${icon('terminal')}Open in Claude Code</button>` : ''}${rt?.running ? `<button class="btn sm danger" data-act="agent-stop" data-id="${d.id}">${icon('stop')}Stop</button>` : ''}<button class="icon-btn" data-act="drawer-close" title="Close">${icon('x')}</button></div>
       ${rt?.handedOff ? `<div class="banner" style="margin:12px 18px 0">${icon('terminal')}<div class="spacer small">This agent is continuing in a Claude Code window. When it's done, send its work for review.</div><button class="btn sm primary" data-act="agent-finish" data-id="${d.id}">Send for review</button></div>` : ''}
       <div class="drawer-body" id="log-scroll"><div class="log">${log.map((e) => `<div class="e ${e.kind}">${esc(e.text)}</div>`).join('') || '<div class="muted small">Starting…</div>'}</div></div>
@@ -1078,7 +1079,12 @@ A['claude-unlink'] = async () => { if (await run(() => api('claude:unlink'), 'Re
 A['init-git'] = async () => { const g = await run(() => api('project:initGit'), 'Git repository initialized'); if (g) { S.gitInfo = g; render(); } };
 A.checkpoint = async () => { const r = await run(() => api('project:checkpoint')); toast(r ? `Committed ${String(r).slice(0, 8)}` : 'Nothing to commit', 'ok'); S.gitInfo = null; render(); };
 
-A['account-login'] = async (d, el) => { el.disabled = true; const a = await run(() => api('account:login')); if (a) S.account = a; render(); };
+A['account-login'] = async (d, el) => {
+  el.disabled = true;
+  const a = await run(() => api('account:login'));
+  if (a) S.account = a; else el.disabled = false;
+  render();
+};
 A['account-cancel'] = async () => { S.account = await run(() => api('account:cancel')) || S.account; render(); };
 A['account-logout'] = async () => { S.account = await run(() => api('account:logout'), 'Signed out') || S.account; render(); };
 A['view-account'] = () => { if (S.project) { S.view = 'settings'; render(); } else window.open(`${S.account.siteUrl}/account`); };
@@ -1134,8 +1140,10 @@ window.tc.on('tc:toast', (t) => toast(t.text, t.kind));
 window.tc.on('tc:needsLogin', () => { S.needsLogin = true; render(); });
 window.tc.on('tc:update', (u) => { S.update = u; render(); });
 // An agent started on this computer (by hand or automatically): open its chat unless something else is open.
-window.tc.on('tc:agentStarted', async ({ agentId }) => {
-  if ($('#modal-root').innerHTML || (S.drawer && S.drawer.kind !== 'agent')) return;
+window.tc.on('tc:agentStarted', async ({ agentId, taskId }) => {
+  if ($('#modal-root').innerHTML) return;
+  // Don't switch away from a chat (or another task); do replace the panel of the task that just started.
+  if (S.drawer && !(S.drawer.kind === 'task' && S.drawer.id === taskId)) return;
   S.drawer = { kind: 'agent', id: agentId };
   S.logs[agentId] = await api('agent:log', { agentId }).catch(() => []);
   renderDrawer();
@@ -1144,6 +1152,9 @@ window.tc.on('tc:account', (a) => {
   const signedIn = !S.account?.user && a.user;
   S.account = a;
   if (signedIn) { S.init.user = { ...S.init.user, name: a.user.name }; toast(`Signed in as ${a.user.name}`, 'ok'); loadCloudProjects(); }
+  // The hosting dialog depends on being signed in: redraw it when that changes.
+  const hosting = $('[data-act="open-go"]');
+  if (hosting && (signedIn || !a.pending)) chooseHosting(hosting.dataset.root);
   render();
 });
 window.tc.on('tc:agentLog', ({ agentId, entry }) => {

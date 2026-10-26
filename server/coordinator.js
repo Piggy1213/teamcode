@@ -29,6 +29,10 @@ const RECENT_EDIT_MS = 10 * 60 * 1000;
 const DIGEST_INTERVAL_MS = 45 * 1000;
 const MAX_HISTORY = 30;
 const MAX_FILE_BYTES = 5 * 1024 * 1024;
+const MAX_ARGS_BYTES = 512 * 1024; // any op other than filePut
+const MAX_EVENTS = 20000; // kept in memory and on disk; older events are dropped
+// Names that would reach Object.prototype (or Object itself) when used as a key on the plain-object state.
+const POISON = new Set(['__proto__', 'constructor', 'prototype']);
 
 const rid = (p) => `${p}_${crypto.randomBytes(5).toString('hex')}`;
 const sha = (buf) => crypto.createHash('sha256').update(buf).digest('hex');
@@ -36,16 +40,27 @@ const isBinary = (buf) => buf.subarray(0, 8000).includes(0);
 const normPath = (p) => String(p || '').replace(/\\/g, '/').replace(/^\.\//, '').replace(/^\/+/, '');
 const clip = (s, n = 160) => { s = String(s ?? '').replace(/\s+/g, ' ').trim(); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
 const arr = (v) => (Array.isArray(v) ? v : v == null || v === '' ? [] : [v]);
+// True if any value (as a whole, or as a normalized path) or any object key is a prototype-reaching name.
+function poisoned(v, depth = 0) {
+  if (depth > 10 || v == null) return false;
+  if (typeof v === 'string') return POISON.has(v) || POISON.has(normPath(v));
+  if (Array.isArray(v)) return v.some((x) => poisoned(x, depth + 1));
+  if (typeof v === 'object') return Object.keys(v).some((k) => POISON.has(k) || poisoned(v[k], depth + 1));
+  return false;
+}
 
 class CoordError extends Error {
   constructor(message, code = 'bad_request') { super(message); this.code = code; }
 }
 
 class Workspace extends EventEmitter {
-  constructor({ id, name, token, dataDir }) {
+  constructor({ id, name, token, dataDir, limits = {} }) {
     super();
     this.id = id;
     this.dataDir = dataDir;
+    // Hosted (cloud) servers cap each workspace; the desktop app and self-hosted servers don't.
+    this.limits = limits;
+    this.blobBytes = 0;
     this.events = [];
     this.delivered = new Map(); // seq -> Set(agentId)
     this.claims = new Map(); // path -> { agentId, hash, at } recent agent edit claims, used to attribute synced writes
@@ -66,6 +81,11 @@ class Workspace extends EventEmitter {
   // ---------- persistence ----------
   _load() {
     fs.mkdirSync(path.join(this.dataDir, 'blobs'), { recursive: true });
+    if (this.limits.maxBytes) {
+      for (const f of fs.readdirSync(path.join(this.dataDir, 'blobs'))) {
+        try { this.blobBytes += fs.statSync(path.join(this.dataDir, 'blobs', f)).size; } catch { /* vanished */ }
+      }
+    }
     const sf = path.join(this.dataDir, 'state.json');
     if (fs.existsSync(sf)) {
       try { Object.assign(this.state, JSON.parse(fs.readFileSync(sf, 'utf8'))); } catch { /* corrupt snapshot: rebuild from defaults */ }
@@ -85,7 +105,11 @@ class Workspace extends EventEmitter {
 
   _saveSoon() {
     if (!this.dataDir || this._saveTimer || this._removed) return;
-    this._saveTimer = setTimeout(() => { this._saveTimer = null; this.saveNow(); }, 400);
+    this._saveTimer = setTimeout(() => {
+      this._saveTimer = null;
+      // A failed save (full disk, removed folder) must not take the whole server down.
+      try { this.saveNow(); } catch (e) { console.error(`workspace ${this.id}: save failed: ${e.message}`); }
+    }, 400);
   }
 
   saveNow() {
@@ -102,7 +126,11 @@ class Workspace extends EventEmitter {
     const h = sha(buf);
     if (this.dataDir) {
       const p = path.join(this.dataDir, 'blobs', h);
-      if (!fs.existsSync(p)) fs.writeFileSync(p, buf);
+      if (!fs.existsSync(p)) {
+        if (this.limits.maxBytes && this.blobBytes + buf.length > this.limits.maxBytes) throw new CoordError(`This project has reached its storage limit (${Math.round(this.limits.maxBytes / 1048576)} MB) on this server`, 'too_large');
+        fs.writeFileSync(p, buf);
+        this.blobBytes += buf.length;
+      }
     } else {
       (this._mem ||= new Map()).set(h, buf);
     }
@@ -134,6 +162,7 @@ class Workspace extends EventEmitter {
     e.summary = this._describe(e);
     this.events.push(e);
     if (this.dataDir && !this._removed) fs.appendFileSync(path.join(this.dataDir, 'events.jsonl'), JSON.stringify(e) + '\n');
+    if (this.events.length > MAX_EVENTS) this._trimEvents();
     this._saveSoon();
     this.emit('event', e);
     return e;
@@ -190,6 +219,17 @@ class Workspace extends EventEmitter {
     }
   }
 
+  // Keeps the newest events in memory and rewrites events.jsonl to match, so neither grows forever.
+  _trimEvents() {
+    this.events.splice(0, this.events.length - Math.floor(MAX_EVENTS * 0.8));
+    if (!this.dataDir || this._removed) return;
+    const f = path.join(this.dataDir, 'events.jsonl');
+    try {
+      fs.writeFileSync(`${f}.tmp`, this.events.map((e) => JSON.stringify(e)).join('\n') + '\n');
+      fs.renameSync(`${f}.tmp`, f);
+    } catch (e) { console.error(`workspace ${this.id}: event log trim failed: ${e.message}`); }
+  }
+
   eventsSince(since = 0, limit = 1000) {
     // events are ordered by seq; binary search for the first event after `since`
     let lo = 0, hi = this.events.length;
@@ -240,6 +280,8 @@ class Workspace extends EventEmitter {
   call(op, args = {}, ctx = {}) {
     const fn = this[`op_${op}`];
     if (typeof fn !== 'function') throw new CoordError(`Unknown operation: ${op}`, 'unknown_op');
+    if (poisoned(args) || poisoned(ctx.user)) throw new CoordError('Invalid name', 'invalid');
+    if (op !== 'filePut' && JSON.stringify(args || {}).length > MAX_ARGS_BYTES) throw new CoordError('Request too large', 'too_large');
     if (op !== 'registerAgent') {
       if (args.agentId && !this.state.agents[args.agentId]) throw new CoordError(`Unknown agent ${args.agentId}. Register first.`, 'unknown_agent');
       if (AGENT_OPS.has(op) && !args.agentId) throw new CoordError(`${op} requires agentId`, 'unknown_agent');
@@ -1086,6 +1128,7 @@ class Workspace extends EventEmitter {
     const curVersion = cur?.version || 0;
     if (cur && ((deleted && cur.deleted) || (!deleted && cur.hash === hash))) return { ok: true, version: cur.version, hash: cur.hash, unchanged: true };
     if (!cur && deleted) return { ok: true, version: 0, unchanged: true };
+    if (!cur && this.limits.maxFiles && Object.keys(this.state.files).length >= this.limits.maxFiles) throw new CoordError(`This project has reached its file limit (${this.limits.maxFiles}) on this server`, 'too_large');
 
     // Attribute the write to the agent whose hook just reported this exact content.
     const claim = this.claims.get(p);
@@ -1227,8 +1270,9 @@ class Workspace extends EventEmitter {
 }
 
 class Coordinator {
-  constructor({ dataDir } = {}) {
+  constructor({ dataDir, limits = {} } = {}) {
     this.dataDir = dataDir || null;
+    this.limits = limits;
     this.workspaces = new Map();
     if (this.dataDir) {
       fs.mkdirSync(this.dataDir, { recursive: true });
@@ -1244,7 +1288,7 @@ class Coordinator {
   }
 
   _open(id, opts = {}) {
-    const w = new Workspace({ id, ...opts, dataDir: this.dataDir ? path.join(this.dataDir, id) : null });
+    const w = new Workspace({ id, ...opts, limits: this.limits, dataDir: this.dataDir ? path.join(this.dataDir, id) : null });
     this.workspaces.set(id, w);
     return w;
   }
@@ -1257,11 +1301,14 @@ class Coordinator {
   get(id) { return this.workspaces.get(id) || null; }
 
   removeWorkspace(id) {
+    if (!/^[a-zA-Z0-9_-]{3,64}$/.test(String(id))) return false;
     const w = this.workspaces.get(id);
-    if (!w) return false;
-    clearTimeout(w._saveTimer);
-    w._removed = true;
-    this.workspaces.delete(id);
+    if (w) {
+      clearTimeout(w._saveTimer);
+      w._removed = true;
+      this.workspaces.delete(id);
+    }
+    // Remove the files even if the workspace couldn't be loaded at boot.
     if (this.dataDir) fs.rmSync(path.join(this.dataDir, id), { recursive: true, force: true });
     return true;
   }

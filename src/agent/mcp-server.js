@@ -123,7 +123,9 @@ const TOOLS = [
     run: async (a) => {
       if (a.status === 'completed') return agentCall(cfg, 'completeTask', { summary: a.summary, taskId: a.task_id });
       if (a.status === 'failed') return agentCall(cfg, 'failTask', { error: a.summary, taskId: a.task_id });
-      if (a.status === 'blocked') return agentCall(cfg, 'reportBlocker', { description: a.summary || 'Blocked' });
+      if (a.status === 'blocked') return agentCall(cfg, 'reportBlocker', { description: a.summary || 'Blocked', taskId: a.task_id });
+      // Claim a task on the board (assigns it to this session) when one is named.
+      if (a.task_id) return agentCall(cfg, 'startTask', { taskId: a.task_id });
       return agentCall(cfg, 'setAgentStatus', { status: 'working', detail: a.summary || 'started' });
     },
   },
@@ -149,9 +151,11 @@ const TOOLS = [
     inputSchema: S({ task_id: str('Task id from team_status') }, ['task_id']),
     run: async (a) => {
       if (!cfg.userId) throw new Error('This connection is not linked to a TeamCode user. Add it from the TeamCode app (Settings, Claude Code) to start tasks on your computer.');
-      const t = await agentCall(cfg, 'updateTask', { taskId: a.task_id, runner: cfg.userId, runnerName: cfg.userName || cfg.name, autoStart: true });
-      if (['failed', 'done', 'cancelled'].includes(t.status)) await agentCall(cfg, 'reopenTask', { taskId: a.task_id });
-      return `"${t.title}" will start on ${cfg.userName || 'your'} computer${t.status === 'waiting' ? ' when its dependencies are done' : ' in a moment'}. The TeamCode app needs to be open.`;
+      const before = await agentCall(cfg, 'updateTask', { taskId: a.task_id, runner: cfg.userId, runnerName: cfg.userName || cfg.name, autoStart: true });
+      if (before.status === 'running') return `"${before.title}" is already running.`;
+      // Reopening also marks the task as changed, so the app retries it even if an earlier start failed.
+      const t = await agentCall(cfg, 'reopenTask', { taskId: a.task_id });
+      return `"${t.title}" will start on ${cfg.userName ? `${cfg.userName}'s` : 'your'} computer ${t.status === 'ready' ? 'in a moment' : 'when its dependencies are done'}. The TeamCode app needs to be open.`;
     },
   },
   {
@@ -186,6 +190,14 @@ async function handle(msg) {
   if (method === 'tools/call') {
     const tool = TOOLS.find((t) => t.name === params?.name);
     if (!tool) return send({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: `Unknown tool ${params?.name}` }], isError: true } });
+    // A connection file is re-read on every call: the app rewrites it when the project's address changes.
+    if (cfgError || cfg?.external) {
+      try {
+        const next = loadConfig();
+        if (cfg && next.url !== cfg.url) registered = null;
+        cfg = next; cfgError = null;
+      } catch (e) { cfgError = e.message; }
+    }
     if (cfgError) return send({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: `TeamCode isn't connected: ${cfgError}` }], isError: true } });
     try {
       if (!registered) registered = await register(cfg);
@@ -220,7 +232,5 @@ process.stdin.on('data', (chunk) => {
 process.stdin.on('end', () => process.exit(0));
 
 // Register immediately and keep a heartbeat so the workspace can tell live agents from stale ones.
-if (cfg) {
-  register(cfg).then((r) => { registered = r; }).catch(() => {});
-  setInterval(() => { agentCall(cfg, 'heartbeat', {}).catch(() => {}); }, 30000).unref();
-}
+if (cfg) register(cfg).then((r) => { registered = r; }).catch(() => {});
+setInterval(() => { if (cfg) agentCall(cfg, 'heartbeat', {}).catch(() => {}); }, 30000).unref();

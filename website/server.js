@@ -8,7 +8,8 @@
 //        DATABASE_URL (Postgres; accounts are off without it in production)
 //        PUBLIC_URL (optional, e.g. https://teamcode.example.com; otherwise taken from the request)
 //        TEAMCODE_DATA, or a Railway volume (RAILWAY_VOLUME_MOUNT_PATH): where cloud team workspaces are kept.
-//        Without one, TeamCode cloud hosting is off. TEAMCODE_MAX_PROJECTS caps projects per account (default 5).
+//        Without one, TeamCode cloud hosting is off. TEAMCODE_MAX_PROJECTS caps projects per account (default 5);
+//        TEAMCODE_MAX_PROJECT_MB (default 500) and TEAMCODE_MAX_PROJECT_FILES (default 20000) cap each project.
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
@@ -46,7 +47,12 @@ function createApp({ env = process.env, db = null } = {}) {
   const limiter = new RateLimiter();
   // Cloud workspaces need both a place to keep files (a volume) and accounts to own them.
   const dataDir = teamDataDir(env);
-  const team = dataDir && db ? new TeamServer({ dataDir, ownServer: false }) : null;
+  const team = dataDir && db ? new TeamServer({
+    dataDir, ownServer: false,
+    // Each cloud project gets a fair share of the volume.
+    limits: { maxBytes: (Number(env.TEAMCODE_MAX_PROJECT_MB) || 500) * 1048576, maxFiles: Number(env.TEAMCODE_MAX_PROJECT_FILES) || 20000 },
+  }) : null;
+  const sockets = new Map(); // ip -> open team WebSocket connections
   const workspaces = team ? new Workspaces({ db, team, maxPerUser: Number(env.TEAMCODE_MAX_PROJECTS) || 5 }) : null;
   // Invites must point at the address people reach this site on.
   const baseUrl = (req, secure) => publicOrigin || `${secure ? 'https' : 'http'}://${(trustProxy && req.headers['x-forwarded-host']) || req.headers.host}`;
@@ -203,8 +209,9 @@ function createApp({ env = process.env, db = null } = {}) {
         if (!workspaces) throw new HttpError(503, 'TeamCode cloud hosting isn\'t set up on this server');
         fromBrowser();
         if (p === '/api/workspaces') {
-          limit('ws-create', 10, 60 * 60000);
-          return json(201, await workspaces.create(await auth(), await readJson(req), baseUrl(req, secure)));
+          const u = await auth();
+          limit('ws-create', 10, 60 * 60000, u.id);
+          return json(201, await workspaces.create(u, await readJson(req), baseUrl(req, secure)));
         }
         limit('account-write', 10, 15 * 60000);
         await workspaces.remove(await auth(), await readJson(req));
@@ -262,7 +269,10 @@ function createApp({ env = process.env, db = null } = {}) {
     let raw;
     try { raw = new URL(req.url, 'http://x').pathname; } catch { return sock.destroy(); }
     if (!team || !raw.startsWith('/team/ws')) return sock.destroy();
-    if (limiter.take(`team-ws:${clientIp(req, trustProxy)}`, 120, 60000)) return sock.destroy();
+    const ip = clientIp(req, trustProxy);
+    if (limiter.take(`team-ws:${ip}`, 120, 60000) || (sockets.get(ip) || 0) >= 20) return sock.destroy();
+    sockets.set(ip, (sockets.get(ip) || 0) + 1);
+    sock.once('close', () => { const n = (sockets.get(ip) || 1) - 1; if (n > 0) sockets.set(ip, n); else sockets.delete(ip); });
     team.handleUpgrade(req, sock, head, raw.slice(5));
   });
   // Drop slow or stalled clients instead of holding sockets open.

@@ -31,7 +31,8 @@ async function main() {
   const cfg = loadConfig();
   // Personal hooks (from "Add to Claude Code") inside an agent TeamCode launched: its own hooks already run.
   if (cfg.insideAgent) return;
-  if (!process.env.TEAMCODE_ROOT && input.cwd) cfg.root = input.cwd;
+  // Fall back to Claude Code's cwd only when no project root was configured (env or connection file).
+  if (!process.env.TEAMCODE_ROOT && !cfg.external && input.cwd) cfg.root = input.cwd;
   const event = input.hook_event_name;
   const tool = input.tool_name;
   const file = input.tool_input?.file_path || input.tool_input?.notebook_path;

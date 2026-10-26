@@ -17,11 +17,12 @@ function safeEqual(a, b) {
 }
 
 class TeamServer {
-  constructor({ dataDir, coordinator, ownServer = true } = {}) {
-    this.coordinator = coordinator || new Coordinator({ dataDir });
+  constructor({ dataDir, coordinator, ownServer = true, limits } = {}) {
+    this.coordinator = coordinator || new Coordinator({ dataDir, limits });
     this.clients = new Set();
     this.subscribed = new Set();
-    this.wss = new WebSocketServer({ noServer: true, maxPayload: 16 * 1024 * 1024 });
+    // Largest message: a 5 MB file, base64-encoded (about 6.7 MB), plus its JSON envelope.
+    this.wss = new WebSocketServer({ noServer: true, maxPayload: 8 * 1024 * 1024 });
     if (ownServer) {
       this.http = http.createServer((req, res) => this.handleRequest(req, res));
       this.http.on('upgrade', (req, sock, head) => this.handleUpgrade(req, sock, head));
@@ -91,6 +92,14 @@ class TeamServer {
     if (req.method === 'GET' && (url === '/' || url === '/health')) return send(200, { ok: true, app: 'teamcode' });
     const m = url.match(/^\/api\/([\w-]+)\/(\w+)$/);
     if (req.method !== 'POST' || !m) return send(404, { ok: false, error: 'Not found' });
+    // Check the workspace and token before reading any body, so strangers can't make the server buffer data.
+    const token = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+    let w;
+    try { w = this._workspace(m[1], token); } catch (err) {
+      send(err.code === 'unauthorized' ? 401 : 404, { ok: false, error: err.message, code: err.code });
+      return req.resume();
+    }
+    if (Number(req.headers['content-length']) > MAX_BODY) { send(413, { ok: false, error: 'Request too large', code: 'too_large' }); return req.resume(); }
     let size = 0, tooBig = false;
     const chunks = [];
     req.on('data', (c) => {
@@ -101,8 +110,6 @@ class TeamServer {
     req.on('end', () => {
       if (tooBig) return;
       try {
-        const token = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
-        const w = this._workspace(m[1], token);
         const args = chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : {};
         const result = w.call(m[2], args, { user: args.user });
         send(200, { ok: true, result });
@@ -116,6 +123,8 @@ class TeamServer {
   _onSocket(ws) {
     const c = { id: crypto.randomBytes(6).toString('hex'), ws, alive: true, workspace: null, user: null };
     this.clients.add(c);
+    // A connection must say hello (workspace + token) promptly, or it's dropped.
+    c.helloTimer = setTimeout(() => { if (!c.workspace) ws.terminate(); }, 10000);
     ws.on('pong', () => { c.alive = true; });
     ws.on('message', (raw) => {
       let msg;
@@ -134,6 +143,7 @@ class TeamServer {
       }
     });
     ws.on('close', () => {
+      clearTimeout(c.helloTimer);
       this.clients.delete(c);
       if (c.workspace && c.user && ![...this.clients].some((o) => o.workspace === c.workspace && o.user?.id === c.user.id)) {
         try { c.workspace.call('userLeft', { user: c.user }); } catch { /* workspace closed */ }
@@ -146,8 +156,10 @@ class TeamServer {
     try {
       const w = this._workspace(msg.workspace, msg.token);
       if (!msg.user?.id) throw new CoordError('user is required');
+      if (/^(__proto__|constructor|prototype)$/.test(String(msg.user.id))) throw new CoordError('Invalid user');
       c.workspace = w;
-      c.user = { id: String(msg.user.id), name: String(msg.user.name || 'Teammate').slice(0, 60) };
+      clearTimeout(c.helloTimer);
+      c.user = { id: String(msg.user.id).slice(0, 80), name: String(msg.user.name || 'Teammate').slice(0, 60) };
       const since = Number(msg.since) || 0;
       const missed = since ? w.eventsSince(since, 5000) : w.events.slice(-300);
       c.ws.send(JSON.stringify({ t: 'welcome', connId: c.id, snapshot: w.call('snapshot'), events: missed, fileIndex: w.call('fileIndex') }));

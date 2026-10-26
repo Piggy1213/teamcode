@@ -566,3 +566,41 @@ test('personal Claude Code hooks stand down inside an agent TeamCode launched', 
   assert.equal(W.state.agents.agt_internal, undefined, 'and the hook did not act for the agent either');
 });
 
+
+test('handing an agent to Claude Code protects its task until Send for review', async () => {
+  const fake = path.join(__dirname, 'fixtures', 'fake-claude.js');
+  if (process.platform !== 'win32') fs.chmodSync(fake, 0o755);
+  else return; // the handoff script itself is exercised on Mac; Windows CI only checks the protections elsewhere
+  const toasts = [];
+  const { W, session } = runnerSession('handoff', fake, toasts);
+  await session.start();
+  await waitFor(() => session.state, { label: 'snapshot' });
+  const t = await session.call('createTask', { title: 'Handoff task', mode: 'shared', runner: 'usr_handoff', runnerName: 'H', autoStart: true });
+  // An agent that is mid-task, with a conversation to resume.
+  await session.call('registerAgent', { agentId: 'agt_hand', name: 'Hana', client: 'Claude Code', taskId: t.id, userId: 'usr_handoff', mode: 'shared', branch: 'main', cwd: session.project.root });
+  await session.call('startTask', { taskId: t.id, agentId: 'agt_hand' });
+  session.agents.meta.agt_hand = { agentId: 'agt_hand', name: 'Hana', taskId: t.id, mode: 'shared', branch: 'main', cwd: session.project.root, sessionId: 'sess-1' };
+
+  // The terminal can't be opened: the task is released like a Stop, not left orphaned.
+  await assert.rejects(() => session.agents.openInClaudeCode('agt_hand', async () => { throw new Error('no terminal'); }), /no terminal/);
+  assert.equal(session.agents.meta.agt_hand.handedOff, undefined);
+  await waitFor(() => W.state.tasks[t.id].status === 'ready', { label: 'task released' });
+  assert.equal(W.state.tasks[t.id].autoStart, false);
+
+  // A real handoff: the script is written, auto-start is off and the agent is kept alive.
+  let script = null;
+  await session.agents.openInClaudeCode('agt_hand', async (f) => { script = f; });
+  assert.ok(fs.existsSync(script) && /--resume/.test(fs.readFileSync(script, 'utf8')));
+  assert.equal(session.agents.meta.agt_hand.handedOff, true);
+  await waitFor(() => W.state.tasks[t.id].status === 'running' && W.state.agents.agt_hand.taskId === t.id, { label: 'task taken back by the agent' });
+  assert.equal(W.state.tasks[t.id].autoStart, false);
+  assert.ok(session.agents.handoffBeats.has('agt_hand'), 'kept alive while in Claude Code');
+  await assert.rejects(() => session.startTask(t.id, { manual: true }), /being worked on in Claude Code/);
+
+  await session.agents.finishHandoff('agt_hand');
+  await waitFor(() => W.state.tasks[t.id].status === 'done', { label: 'completed on Send for review' });
+  assert.equal(session.agents.meta.agt_hand.handedOff, false);
+  assert.equal(session.agents.handoffBeats.size, 0);
+  fs.rmSync(script, { force: true });
+  await session.stop();
+});
