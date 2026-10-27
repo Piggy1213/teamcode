@@ -20,7 +20,7 @@ const EVENT_TYPES = [
   'blocker.reported', 'blocker.resolved', 'contract.updated', 'coordination.requested',
 ];
 
-const AGENT_OPS = new Set(['heartbeat', 'sessionEnded', 'setAgentStatus', 'agentRead', 'preEdit', 'fileEdited', 'announceEdit', 'releaseFiles', 'pullDigest', 'getUpdates']);
+const AGENT_OPS = new Set(['heartbeat', 'setAgentStatus', 'agentRead', 'preEdit', 'fileEdited', 'announceEdit', 'releaseFiles', 'pullDigest', 'getUpdates']);
 const ACTIVE = new Set(['starting', 'working', 'idle', 'waiting', 'blocked']);
 const STALE_MS = 90 * 1000;
 const OFFLINE_MS = 10 * 60 * 1000;
@@ -42,7 +42,7 @@ const GROWTH_OPS = new Set(['createTask', 'createTasks', 'chat', 'publishUpdate'
 // only these still run: reading, finishing and cleaning up work, and changes to files the project already has.
 const CEILING_OK = new Set([
   'getContract', 'checkFiles', 'pullDigest', 'getUpdates', 'getContext', 'teamStatus', 'getAgent', 'findOverlaps', 'taskChanges',
-  'fileIndex', 'fileGet', 'conflictData', 'fileHistory', 'snapshot', 'events', 'userJoined', 'userLeft', 'heartbeat', 'sessionEnded', 'setAgentStatus', 'agentExited',
+  'fileIndex', 'fileGet', 'conflictData', 'fileHistory', 'snapshot', 'events', 'userJoined', 'userLeft', 'heartbeat', 'setAgentStatus', 'agentExited',
   'releaseFiles', 'completeTask', 'failTask', 'cancelTask', 'deleteTask', 'reopenTask', 'requestReview', 'reviewDecision', 'testCompleted',
   'integrationChecked', 'markMerged', 'markReverted', 'resolveBlocker', 'resolveConflictRecord', 'resolveConflict', 'fileRevert',
 ]);
@@ -56,7 +56,6 @@ const PRUNE_AFTER = 7 * 24 * 3600 * 1000; // finished agents and resolved confli
 const NOTICE_PRUNE_AFTER = 24 * 3600 * 1000; // overlap and integration-risk notices are advice; they go after a day
 const MAX_USERS = 500; // people one project remembers
 const MAX_OTHERS = 20; // other people's versions remembered per file a task changed
-const MAX_SESSIONS = 8; // sessions remembered per agent id
 const HASH_RE = /^[0-9a-f]{64}$/;
 const cleanHash = (h) => (typeof h === 'string' && HASH_RE.test(h) ? h : null);
 
@@ -159,7 +158,7 @@ class Workspace extends EventEmitter {
   _normalize() {
     for (const k of DICT_KEYS) this.state[k] = dict(this.state[k]);
     for (const p of Object.keys(this.state.reservations)) this.state.reservations[p] = dict(this.state.reservations[p]);
-    for (const a of Object.values(this.state.agents)) for (const k of ['reads', 'touched', 'edited', 'warned', 'contractsSeen', 'seen']) a[k] = dict(a[k]);
+    for (const a of Object.values(this.state.agents)) for (const k of ['reads', 'touched', 'edited', 'warned', 'contractsSeen']) a[k] = dict(a[k]);
     for (const t of Object.values(this.state.tasks)) {
       t.contractsUsed = dict(t.contractsUsed);
       if (t.changes) { t.changes = dict(t.changes); t.changeActors = dict(t.changeActors); }
@@ -488,20 +487,7 @@ class Workspace extends EventEmitter {
     return { kind: 'system', id: 'system', name: 'TeamCode' };
   }
 
-  // Clients with a fixed agent id (Claude Code added as MCP) run one MCP process per session, several at once
-  // sometimes; each sends its session id. Which session claimed the agent's task, and when each was last
-  // heard from, decides whether a task is still being worked on.
-  _sawSession(a, session) {
-    a.seen = a.seen || dict();
-    delete a.seen[session];
-    a.seen[session] = Date.now();
-    const keys = Object.keys(a.seen);
-    for (const k of keys.slice(0, Math.max(0, keys.length - MAX_SESSIONS))) delete a.seen[k];
-  }
-
-  _sessionAlive(a, session) { return !!session && Date.now() - (a.seen?.[session] || 0) < STALE_MS; }
-
-  _touchAgent(a, op, session) {
+  _touchAgent(a, op) {
     a.lastSeen = Date.now();
     if (a.status === 'stale' || a.status === 'offline') {
       const from = a.status;
@@ -509,16 +495,14 @@ class Workspace extends EventEmitter {
       this.emitEvent('agent.status_changed', a, { task: a.taskId, data: { from, to: a.status, detail: 'reconnected' } });
     }
     // Finishing, reopening or exiting never brings a task back; carrying on with the work does.
-    if (RESUME_OPS.has(op)) this._resumeTask(a, session);
+    if (RESUME_OPS.has(op)) this._resumeTask(a);
   }
 
   // An agent back from sleep whose task the sweep put back in the queue, and nobody has touched since,
   // carries on with it, in the state it left it (a blocked task stays blocked).
-  _resumeTask(a, session) {
+  _resumeTask(a) {
     const t = a.taskId && this.state.tasks[a.taskId];
     if (!t || t.status !== 'ready' || t.assignee !== a.id || t.releasedFrom !== a.id) return;
-    // A task claimed from one session of a fixed-id client comes back only to that session.
-    if (t.releasedSession && t.releasedSession !== session) return;
     // Still blocked only if its blocker is still open (someone may have resolved it meanwhile).
     const blocked = t.releasedStatus === 'blocked' && Object.values(this.state.blockers).some((b) => b.taskId === t.id && b.status === 'open');
     t.status = blocked ? 'blocked' : 'running'; t.updatedAt = Date.now();
@@ -534,13 +518,13 @@ class Workspace extends EventEmitter {
       t.status = 'ready'; t.updatedAt = Date.now();
       this.emitEvent('task.updated', a, { task: t.id, data: { changes: { status: 'ready' }, reason } });
     }
-    if (forget && a.taskId === t.id) { a.taskId = null; a.taskSession = null; }
+    if (forget && a.taskId === t.id) a.taskId = null;
     if (a.status === 'blocked') this._setAgentStatus(a, 'working', reason); // its blocker was about that task
   }
 
   // Whatever happens to a task after the sweep released it (started, reassigned, reopened, finished...)
   // means its old agent no longer picks it back up.
-  _unrelease(t) { delete t.releasedFrom; delete t.releasedStatus; delete t.releasedSession; }
+  _unrelease(t) { delete t.releasedFrom; delete t.releasedStatus; }
 
   _setAgentStatus(a, to, detail) {
     if (a.status === to && !detail) return;
@@ -569,12 +553,7 @@ class Workspace extends EventEmitter {
     if (op !== 'registerAgent') {
       if (args.agentId && !this.state.agents[args.agentId]) throw new CoordError(`Unknown agent ${args.agentId}. Register first.`, 'unknown_agent');
       if (AGENT_OPS.has(op) && !args.agentId) throw new CoordError(`${op} requires agentId`, 'unknown_agent');
-      if (args.agentId) {
-        const a = this.state.agents[args.agentId];
-        const session = typeof args.session === 'string' && args.session ? clip(args.session, 40) : null;
-        if (session && op !== 'sessionEnded') this._sawSession(a, session);
-        this._touchAgent(a, op, session);
-      }
+      if (args.agentId) this._touchAgent(this.state.agents[args.agentId], op);
     }
     const res = fn.call(this, args, ctx);
     this._saveSoon();
@@ -621,35 +600,31 @@ class Workspace extends EventEmitter {
   }
 
   // ---------- agents ----------
-  op_registerAgent({ agentId, name, client, taskId, userId, mode, branch, cwd, session }, ctx) {
+  op_registerAgent({ agentId, name, client, taskId, userId, mode, branch, cwd, perSession }, ctx) {
     let a = agentId && this.state.agents[agentId];
-    session = typeof session === 'string' && session ? clip(session, 40) : null;
     if (a) {
       const wasInactive = !ACTIVE.has(a.status);
-      // Was the session that claimed this agent's task still heard from? (Checked before this one counts.)
-      const claimantAlive = a.taskSession ? this._sessionAlive(a, a.taskSession) : !wasInactive;
       Object.assign(a, { client: client || a.client, cwd: cwd || a.cwd, lastSeen: Date.now() });
-      if (session) this._sawSession(a, session);
+      if (perSession) a.perSession = true;
       // A reconnecting agent whose task has moved on to another live agent rejoins without it.
       if (taskId && taskId !== a.taskId) { try { this._assign(a, taskId); } catch (e) { if (e.code !== 'busy') throw e; } }
       const held = a.taskId && this.state.tasks[a.taskId];
       if (held && held.assignee && held.assignee !== a.id) a.taskId = null;
-      // A client with a fixed id (Claude Code added as MCP) keeps its id across sessions and never names a task.
-      // A new session of it doesn't take over the old session's task: once that session is gone (quit, crashed,
-      // or no longer heard from), the task goes back to the queue. While it is still working, it keeps it.
-      const sameSession = !!session && a.taskSession === session;
-      if (!taskId && held && a.taskId === held.id && !sameSession && !claimantAlive) this._dropTask(a, held, `${a.name}'s earlier session ended`);
+      // Claude Code sessions each have an agent of their own (perSession), so registering again is the same
+      // session. An older Claude Code shares one id between sessions and never names a task: registering after
+      // it went quiet is a new session, which starts without the old session's task (back to the queue).
+      if (!taskId && held && a.taskId === held.id && wasInactive && !a.perSession) this._dropTask(a, held, `${a.name} started a new session`);
       if (wasInactive) {
         this._setAgentStatus(a, 'working', 'reconnected');
         // A TeamCode agent names its task when it registers, so it can carry on with it.
-        if (taskId && taskId === a.taskId) this._resumeTask(a, session);
+        if (taskId && taskId === a.taskId) this._resumeTask(a);
       }
       const missed = this._relevantSince(a, a.cursor);
       return { agent: this._agentView(a), reconnected: true, missedCount: missed.length, missed: this._digestText(missed) };
     }
     a = {
       id: agentId || rid('agt'), name: name || 'Agent', client: client || 'MCP client', userId: userId || ctx.user?.id || null,
-      taskId: null, taskSession: null, seen: dict(session ? { [session]: Date.now() } : null), status: 'working', prevStatus: 'working', detail: '', mode: mode || 'shared', branch: branch || 'main',
+      taskId: null, perSession: !!perSession, status: 'working', prevStatus: 'working', detail: '', mode: mode || 'shared', branch: branch || 'main',
       cwd: cwd || null, startedAt: Date.now(), lastSeen: Date.now(), cursor: this.state.seq, lastDigestAt: 0,
       reads: dict(), touched: dict(), edited: dict(), warned: dict(), updates: [], contractsSeen: dict(),
     };
@@ -682,14 +657,13 @@ class Workspace extends EventEmitter {
     if (owner && owner.id !== a.id) throw new CoordError(`${owner.name} is working on this task.`, 'busy');
     // The previous assignee no longer has this task (so a woken agent can't act on it).
     const prev = t.assignee && t.assignee !== a.id && this.state.agents[t.assignee];
-    if (prev && prev.taskId === t.id) { prev.taskId = null; prev.taskSession = null; }
+    if (prev && prev.taskId === t.id) prev.taskId = null;
     // An agent moving to a new task gives its old one back to the queue.
     const old = a.taskId && a.taskId !== taskId && this.state.tasks[a.taskId];
     if (old && ['running', 'blocked'].includes(old.status) && old.assignee === a.id) {
       old.status = 'ready'; old.updatedAt = Date.now();
       this.emitEvent('task.updated', a, { task: old.id, data: { changes: { status: 'ready' }, reason: `${a.name} moved to another task` } });
     }
-    if (a.taskId !== taskId) a.taskSession = null;
     a.taskId = taskId;
     if (t.assignee !== a.id) {
       this._unrelease(t);
@@ -703,20 +677,6 @@ class Workspace extends EventEmitter {
     if (!a) throw new CoordError('Unknown agent', 'unknown_agent');
     if (status) this._setAgentStatus(a, clip(status, 40), clip(detail, 300));
     return { ok: true, pending: this._relevantSince(a, a.cursor).length };
-  }
-
-  // A fixed-id client's session quit cleanly. The task that session claimed goes back to the queue (the agent id
-  // may live on in other sessions); with no session left, the agent is done.
-  op_sessionEnded({ agentId, session }) {
-    const a = this.state.agents[agentId];
-    session = typeof session === 'string' ? clip(session, 40) : '';
-    if (!session) return false;
-    if (a.seen) delete a.seen[session];
-    const t = a.taskId && this.state.tasks[a.taskId];
-    if (t && a.taskSession === session) this._dropTask(a, t, `${a.name}'s session ended`);
-    // Still holding a task (another session's, or one a TeamCode agent is on): it isn't done.
-    if (!a.taskId && !Object.keys(a.seen || {}).some((k) => this._sessionAlive(a, k)) && ACTIVE.has(a.status)) this._setAgentStatus(a, 'done', 'session ended');
-    return true;
   }
 
   op_setAgentStatus({ agentId, status, detail }) {
@@ -889,7 +849,7 @@ class Workspace extends EventEmitter {
     return t;
   }
 
-  op_startTask({ taskId, agentId, branch, worktree, baseCommit, force, session }, ctx) {
+  op_startTask({ taskId, agentId, branch, worktree, baseCommit, force }, ctx) {
     const t = this._task(taskId);
     // Already running under this same agent (e.g. it just reconnected and resumed it): nothing to do.
     // Running with no live agent (it crashed or quit without releasing the task) can be picked up below.
@@ -906,11 +866,7 @@ class Workspace extends EventEmitter {
       throw new CoordError(`Task is waiting on: ${pending.join(', ')}`, 'waiting');
     }
     const actor = this._actor({ agentId }, ctx);
-    if (agentId) {
-      this._assign(actor.agent, taskId);
-      // Started from a session of a fixed-id client: that session has it. (Desktop agents: no session.)
-      actor.agent.taskSession = typeof session === 'string' && session ? clip(session, 40) : null;
-    }
+    if (agentId) this._assign(actor.agent, taskId);
     this._unrelease(t);
     Object.assign(t, {
       status: 'running', startedAt: Date.now(), updatedAt: Date.now(), branch: branch || t.branch || 'main',
@@ -1711,24 +1667,14 @@ class Workspace extends EventEmitter {
     const now = Date.now();
     this._prune(now);
     for (const a of Object.values(this.state.agents)) {
-      // The session that claimed the task went quiet while other sessions of the same client carry on.
-      if (ACTIVE.has(a.status) && a.taskSession && now - (a.seen?.[a.taskSession] || 0) > OFFLINE_MS) {
-        const t = a.taskId && this.state.tasks[a.taskId];
-        if (t && ['running', 'blocked'].includes(t.status) && t.assignee === a.id) {
-          t.releasedFrom = a.id; t.releasedStatus = t.status; t.releasedSession = a.taskSession;
-          t.status = 'ready'; t.updatedAt = now;
-          this.emitEvent('task.updated', null, { task: t.id, data: { changes: { status: 'ready' }, reason: `${a.name}'s session disconnected; task returned to queue` } });
-        }
-      }
       if (ACTIVE.has(a.status) && now - a.lastSeen > STALE_MS) this._setAgentStatus(a, 'stale', 'no heartbeat for 90s');
       else if (a.status === 'stale' && now - a.lastSeen > OFFLINE_MS) {
         this._releaseAll(a, true);
         this._setAgentStatus(a, 'offline', 'disconnected');
         const t = a.taskId && this.state.tasks[a.taskId];
         if (t && ['running', 'blocked'].includes(t.status) && t.assignee === a.id) {
-          // Marked, so this agent (and, for a fixed-id client, the same session) can carry on with it if it
-          // comes back first.
-          t.releasedFrom = a.id; t.releasedStatus = t.status; t.releasedSession = a.taskSession || null;
+          // Marked, so this agent (and only this agent) can carry on with it if it comes back first.
+          t.releasedFrom = a.id; t.releasedStatus = t.status;
           t.status = 'ready'; t.updatedAt = now;
           this.emitEvent('task.updated', null, { task: t.id, data: { changes: { status: 'ready' }, reason: `${a.name} disconnected; task returned to queue` } });
         }

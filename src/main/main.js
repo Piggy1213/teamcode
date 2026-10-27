@@ -108,7 +108,7 @@ async function openSession(project) {
   await session.start();
   const link = claudeCodeLink(session); // the local server's port can change between runs; keep Claude Code's connection current
   // If TeamCode or node moved since "Add to Claude Code", point Claude Code at the new paths.
-  if (project.claudeLinked && project.claudeLinkedServer !== JSON.stringify(link.server)) linkClaudeCode(session).catch(() => {});
+  if (project.claudeLinked && (project.claudeLinkedServer !== JSON.stringify(link.server) || project.claudeLinkedHooks !== HOOK_EVENTS.join(','))) linkClaudeCode(session).catch(() => {});
   win?.setTitle(`${project.name} | TeamCode`);
   return projectView(project);
 }
@@ -130,7 +130,7 @@ function claudeChanged() { session?.resumeAuto(); }
 // ---------- Claude Code integration ("Add to Claude Code") ----------
 // Claude Code gets an MCP entry and hooks that read their connection from a private file TeamCode keeps
 // current, so the workspace token never lands in the project folder or in Claude Code's own config.
-const HOOK_EVENTS = ['PreToolUse', 'PostToolUse', 'SessionStart', 'UserPromptSubmit', 'Stop'];
+const HOOK_EVENTS = ['PreToolUse', 'PostToolUse', 'SessionStart', 'UserPromptSubmit', 'Stop', 'SessionEnd'];
 
 function claudeCodeLink(s) {
   const p = s.project;
@@ -188,6 +188,7 @@ async function linkClaudeCode(s) {
   writeClaudeHooks(s.project.root, link.hookCmd);
   s.project.claudeLinked = true;
   s.project.claudeLinkedServer = JSON.stringify(link.server);
+  s.project.claudeLinkedHooks = HOOK_EVENTS.join(',');
   saveConfig();
   try { gitExclude(s.project.root, '.claude/settings.local.json'); } catch { /* optional */ }
 }
@@ -368,6 +369,7 @@ const handlers = {
     writeClaudeHooks(s.project.root, null);
     s.project.claudeLinked = false;
     delete s.project.claudeLinkedServer;
+    delete s.project.claudeLinkedHooks;
     saveConfig();
     return true;
   },

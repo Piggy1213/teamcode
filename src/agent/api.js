@@ -34,11 +34,20 @@ function loadConfig(env = process.env, argv = process.argv) {
   const token = env.TEAMCODE_TOKEN || base.token;
   if (!url || !workspace || !token) throw new Error('TeamCode is not configured: set TEAMCODE_INVITE (or TEAMCODE_URL, TEAMCODE_WORKSPACE and TEAMCODE_TOKEN).');
   const root = path.resolve(env.TEAMCODE_ROOT || process.cwd());
-  const name = env.TEAMCODE_AGENT_NAME || `${os.userInfo().username}'s ${env.TEAMCODE_CLIENT || 'AI agent'}`;
+  let name = env.TEAMCODE_AGENT_NAME || `${os.userInfo().username}'s ${env.TEAMCODE_CLIENT || 'AI agent'}`;
   // External agents get a stable id derived from workspace + name + folder, so reconnecting resumes their event cursor.
-  const agentId = env.TEAMCODE_AGENT_ID || 'agt_ext_' + crypto.createHash('sha1').update(`${workspace}|${name}|${root.toLowerCase()}`).digest('hex').slice(0, 12);
+  let agentId = env.TEAMCODE_AGENT_ID || 'agt_ext_' + crypto.createHash('sha1').update(`${workspace}|${name}|${root.toLowerCase()}`).digest('hex').slice(0, 12);
+  // Each Claude Code session joins as an agent of its own, so two sessions in one folder never share a task or
+  // each other's edits. Its MCP server and its hooks both see CLAUDE_CODE_SESSION_ID, so they agree on the id.
+  // (Claude Code versions without it: one agent per folder, as before.) Agents TeamCode launched keep their own id.
+  const sid = !insideAgent && !env.TEAMCODE_TASK_ID && (file || !env.TEAMCODE_AGENT_ID) ? String(env.CLAUDE_CODE_SESSION_ID || '') : '';
+  const perSession = /^[A-Za-z0-9-]{8,100}$/.test(sid);
+  if (perSession) {
+    agentId = `${agentId}_${crypto.createHash('sha1').update(sid).digest('hex').slice(0, 10)}`;
+    name = `${name} (${sid.slice(0, 4)})`;
+  }
   return {
-    url, workspace, token, root, name, agentId,
+    url, workspace, token, root, name, agentId, perSession,
     branch: env.TEAMCODE_BRANCH || 'main', taskId: env.TEAMCODE_TASK_ID || null,
     client: env.TEAMCODE_CLIENT || 'Claude Code', userId: env.TEAMCODE_USER_ID || null, userName: env.TEAMCODE_USER_NAME || null,
     mode: env.TEAMCODE_MODE || 'shared', external: !!file && !insideAgent, insideAgent,
@@ -73,18 +82,18 @@ function post(cfg, op, args, timeoutMs = 8000) {
 // Calls an agent operation, registering the agent first if the server doesn't know it yet.
 async function agentCall(cfg, op, args = {}, timeoutMs) {
   try {
-    return await post(cfg, op, { agentId: cfg.agentId, ...(cfg.session ? { session: cfg.session } : {}), ...args }, timeoutMs);
+    return await post(cfg, op, { agentId: cfg.agentId, ...args }, timeoutMs);
   } catch (e) {
     if (e.code !== 'unknown_agent') throw e;
     await register(cfg);
-    return post(cfg, op, { agentId: cfg.agentId, ...(cfg.session ? { session: cfg.session } : {}), ...args }, timeoutMs);
+    return post(cfg, op, { agentId: cfg.agentId, ...args }, timeoutMs);
   }
 }
 
 function register(cfg) {
   return post(cfg, 'registerAgent', {
     agentId: cfg.agentId, name: cfg.name, client: cfg.client, taskId: cfg.taskId, userId: cfg.userId,
-    mode: cfg.mode, branch: cfg.branch, cwd: cfg.root, session: cfg.session,
+    mode: cfg.mode, branch: cfg.branch, cwd: cfg.root, ...(cfg.perSession ? { perSession: true } : {}),
   });
 }
 

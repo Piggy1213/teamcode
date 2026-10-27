@@ -8,7 +8,7 @@
 //   PostToolUse (Edit/Write/...)     -> publish file.changed; inject relevant team updates
 //   Stop                             -> don't let the agent finish while urgent team updates are unread
 // Any failure exits 0 silently so the agent is never blocked by TeamCode being unavailable.
-const { loadConfig, agentCall, relPath, fileHash } = require('./api');
+const { loadConfig, agentCall, post, relPath, fileHash } = require('./api');
 
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
 
@@ -36,6 +36,13 @@ async function main() {
   const event = input.hook_event_name;
   const tool = input.tool_name;
   const file = input.tool_input?.file_path || input.tool_input?.notebook_path;
+
+  // The Claude Code session closed (or was cleared). Its agent is done; a task it was still on goes back to the
+  // queue. Only for per-session agents: an older Claude Code shares one agent between sessions.
+  if (event === 'SessionEnd') {
+    if (cfg.perSession) await post(cfg, 'agentExited', { agentId: cfg.agentId, outcome: 'done', detail: 'Claude Code session ended' }, 3000).catch(() => {});
+    return;
+  }
 
   if (event === 'PreToolUse' && EDIT_TOOLS.has(tool)) {
     const rel = relPath(cfg, file);

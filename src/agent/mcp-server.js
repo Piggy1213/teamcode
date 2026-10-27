@@ -5,13 +5,9 @@
 // decisions, blockers and interface contracts, and request coordination or review.
 const { loadConfig, agentCall, register, relPath, fileHash } = require('./api');
 
-// One id for this process: the server tells a new Claude Code session from this one reconnecting by it.
-const SESSION = require('crypto').randomBytes(8).toString('hex');
-const load = () => ({ ...loadConfig(), session: SESSION });
-
 // A bad or missing config must not crash before the MCP handshake: report it from every tool instead.
 let cfg = null, cfgError = null;
-try { cfg = load(); } catch (e) { cfgError = e.message; }
+try { cfg = loadConfig(); } catch (e) { cfgError = e.message; }
 let registered = null;
 
 const S = (props, required = []) => ({ type: 'object', properties: props, required, additionalProperties: false });
@@ -205,7 +201,7 @@ async function handle(msg) {
     // A connection file is re-read on every call: the app rewrites it when the project's address changes.
     if (cfgError || cfg?.external) {
       try {
-        const next = load();
+        const next = loadConfig();
         if (cfg && next.url !== cfg.url) registered = null;
         cfg = next; cfgError = null;
       } catch (e) { cfgError = e.message; }
@@ -241,12 +237,7 @@ process.stdin.on('data', (chunk) => {
     handle(msg).catch(() => {});
   }
 });
-// Claude Code quit. A connection added from the app (no task of its own) tells the team its session is over,
-// so a task it claimed goes back to the queue now rather than after the 10-minute timeout.
-process.stdin.on('end', () => {
-  if (!cfg || cfg.taskId || !registered) return process.exit(0);
-  agentCall(cfg, 'sessionEnded', {}, 3000).catch(() => {}).finally(() => process.exit(0));
-});
+process.stdin.on('end', () => process.exit(0));
 
 // Register immediately and keep a heartbeat so the workspace can tell live agents from stale ones.
 if (cfg) register(cfg).then((r) => { registered = r; }).catch(() => {});

@@ -520,63 +520,41 @@ test('Revert skips files whose old version is gone for good, and still records t
 // ---- round 7 ----
 const startOn = (W, agentId, taskId, extra = {}) => { W.call('registerAgent', { agentId, name: agentId, ...extra }, user); W.call('startTask', { taskId, agentId }, user); };
 
-test('Claude Code sessions sharing one agent id: a live session keeps its task; a gone one loses it', () => {
-  const c = new Coordinator({ dataDir: tmp() });
-  const W = c.ensureWorkspace('sess-ws', { name: 'S' });
-  const t = W.call('createTask', { title: 'Job' }, user);
-  W.call('registerAgent', { agentId: 'agt_cc_s', name: 'Uma\'s Claude Code', session: 's1' }, user);
-  W.call('startTask', { taskId: t.id, agentId: 'agt_cc_s', session: 's1' }, user);
-  W.call('registerAgent', { agentId: 'agt_cc_s', name: 'x', session: 's1' }, user); // same process again
-  assert.equal(W.state.agents.agt_cc_s.taskId, t.id);
-  // A second session opens while the first is still working (another terminal, `claude mcp list`...).
-  W.call('heartbeat', { agentId: 'agt_cc_s', session: 's1' }, user);
-  W.call('registerAgent', { agentId: 'agt_cc_s', name: 'x', session: 's2' }, user);
-  assert.equal(W.state.tasks[t.id].status, 'running', 'the working session keeps its task');
-  assert.equal(W.state.agents.agt_cc_s.taskId, t.id);
-  // The first session crashed (no word for two minutes); a new one registers: the task goes back to the queue.
-  W.state.agents.agt_cc_s.seen.s1 = Date.now() - 2 * 60 * 1000;
-  W.call('registerAgent', { agentId: 'agt_cc_s', name: 'x', session: 's3' }, user);
-  assert.equal(W.state.tasks[t.id].status, 'ready');
-  assert.equal(W.state.agents.agt_cc_s.taskId, null);
-  W.call('registerAgent', { agentId: 'agt_bo', name: 'Bo' }, user);
-  W.call('startTask', { taskId: t.id, agentId: 'agt_bo' }, user); // a teammate can take it
-  // A session that quits cleanly gives its task back at once.
-  const t2 = W.call('createTask', { title: 'Job 2' }, user);
-  W.call('startTask', { taskId: t2.id, agentId: 'agt_cc_s', session: 's3' }, user);
-  W.call('sessionEnded', { agentId: 'agt_cc_s', session: 's3' }, user);
-  assert.equal(W.state.tasks[t2.id].status, 'ready');
-  c.close();
+test('each Claude Code session joins as its own agent; its MCP server and hooks agree on the id', () => {
+  const { loadConfig } = require('../../src/agent/api');
+  const dir = tmp();
+  const file = path.join(dir, 'claude-code.json');
+  fs.writeFileSync(file, JSON.stringify({ TEAMCODE_URL: 'http://127.0.0.1:1', TEAMCODE_WORKSPACE: 'w-ws', TEAMCODE_TOKEN: 't', TEAMCODE_ROOT: dir, TEAMCODE_AGENT_ID: 'agt_cc_abc', TEAMCODE_AGENT_NAME: "Uma's Claude Code" }));
+  const argv = ['node', 'x.js', '--config', file];
+  const s1 = loadConfig({ CLAUDE_CODE_SESSION_ID: '6faf3834-95ae-4270-9138-35848b9b5a3a' }, argv);
+  const s1again = loadConfig({ CLAUDE_CODE_SESSION_ID: '6faf3834-95ae-4270-9138-35848b9b5a3a' }, argv); // its hook process
+  const s2 = loadConfig({ CLAUDE_CODE_SESSION_ID: '0b1c2d3e-0000-4000-8000-000000000000' }, argv);
+  assert.equal(s1.agentId, s1again.agentId);
+  assert.notEqual(s1.agentId, s2.agentId);
+  assert.match(s1.agentId, /^agt_cc_abc_[0-9a-f]{10}$/);
+  assert.equal(s1.perSession, true);
+  assert.equal(s1.name, "Uma's Claude Code (6faf)");
+  // Older Claude Code without the variable: one agent for the folder, as before.
+  assert.equal(loadConfig({}, argv).agentId, 'agt_cc_abc');
+  // An agent TeamCode launched keeps its own identity even though Claude Code sets the variable for it too.
+  const inside = loadConfig({ CLAUDE_CODE_SESSION_ID: '6faf3834-95ae-4270-9138-35848b9b5a3a', TEAMCODE_AGENT_ID: 'agt_x', TEAMCODE_URL: 'http://h', TEAMCODE_WORKSPACE: 'w-ws', TEAMCODE_TOKEN: 't', TEAMCODE_TASK_ID: 'tsk_1' }, ['node', 'x.js']);
+  assert.equal(inside.agentId, 'agt_x');
+  assert.equal(inside.perSession, false);
 });
 
-test('a session that quits cleanly while TeamCode\'s own agent holds the task does not end that agent', () => {
+test('a per-session agent registering again is the same session: it keeps its task, and resumes it after sleep', () => {
   const c = new Coordinator({ dataDir: tmp() });
-  const W = c.ensureWorkspace('sessend-ws', { name: 'E' });
+  const W = c.ensureWorkspace('perses-ws', { name: 'P' });
   const t = W.call('createTask', { title: 'Job' }, user);
-  startOn(W, 'agt_in', t.id, { taskId: t.id, session: 'm1' });
-  W.call('sessionEnded', { agentId: 'agt_in', session: 'm1' }, user);
+  W.call('registerAgent', { agentId: 'agt_cc_x_1', name: 'U', perSession: true }, user);
+  W.call('startTask', { taskId: t.id, agentId: 'agt_cc_x_1' }, user);
+  W.state.agents.agt_cc_x_1.lastSeen = Date.now() - 2 * 60 * 1000; W.sweep(); // idle: stale
+  W.call('registerAgent', { agentId: 'agt_cc_x_1', name: 'U', perSession: true }, user); // its MCP server restarted
   assert.equal(W.state.tasks[t.id].status, 'running');
-  assert.equal(W.state.agents.agt_in.status, 'working');
-  c.close();
-});
-
-test('only the session that held a task gets it back after sleep; hooks and new sessions do not', () => {
-  const c = new Coordinator({ dataDir: tmp() });
-  const W = c.ensureWorkspace('hookfirst-ws', { name: 'H' });
-  const t = W.call('createTask', { title: 'Job' }, user);
-  W.call('registerAgent', { agentId: 'agt_cc_h', name: 'H', session: 's1' }, user);
-  W.call('startTask', { taskId: t.id, agentId: 'agt_cc_h', session: 's1' }, user);
-  goOffline(W, 'agt_cc_h');
-  assert.equal(W.state.tasks[t.id].releasedSession, 's1');
-  W.call('getContext', { agentId: 'agt_cc_h' }, user); // a hook (no session) first
-  W.call('pullDigest', { agentId: 'agt_cc_h' }, user);
+  goOffline(W, 'agt_cc_x_1');
   assert.equal(W.state.tasks[t.id].status, 'ready');
-  W.call('heartbeat', { agentId: 'agt_cc_h', session: 's1' }, user); // the same session wakes up
-  assert.equal(W.state.tasks[t.id].status, 'running', 'its session carries on with it');
-  goOffline(W, 'agt_cc_h');
-  W.call('registerAgent', { agentId: 'agt_cc_h', name: 'H', session: 's2' }, user); // a new session instead
-  W.call('heartbeat', { agentId: 'agt_cc_h', session: 's2' }, user);
-  assert.equal(W.state.tasks[t.id].status, 'ready');
-  assert.equal(W.state.agents.agt_cc_h.taskId, null);
+  W.call('heartbeat', { agentId: 'agt_cc_x_1' }, user);
+  assert.equal(W.state.tasks[t.id].status, 'running', 'back from sleep: carries on');
   c.close();
 });
 
@@ -584,13 +562,65 @@ test('a dropped task takes the agent\'s blocked status with it', () => {
   const c = new Coordinator({ dataDir: tmp() });
   const W = c.ensureWorkspace('dropblk-ws', { name: 'D' });
   const t = W.call('createTask', { title: 'Job' }, user);
-  W.call('registerAgent', { agentId: 'agt_cc_d', name: 'D', session: 's1' }, user);
-  W.call('startTask', { taskId: t.id, agentId: 'agt_cc_d', session: 's1' }, user);
-  W.call('reportBlocker', { agentId: 'agt_cc_d', description: 'need API', session: 's1' }, user);
-  W.call('sessionEnded', { agentId: 'agt_cc_d', session: 's1' }, user);
+  W.call('registerAgent', { agentId: 'agt_cc_d', name: 'D' }, user);
+  W.call('startTask', { taskId: t.id, agentId: 'agt_cc_d' }, user);
+  W.call('reportBlocker', { agentId: 'agt_cc_d', description: 'need API' }, user);
+  W.state.agents.agt_cc_d.lastSeen = Date.now() - 2 * 60 * 1000; W.sweep();
+  W.call('registerAgent', { agentId: 'agt_cc_d', name: 'D' }, user); // an older Claude Code's new session
   assert.equal(W.state.tasks[t.id].status, 'ready');
   assert.notEqual(W.state.agents.agt_cc_d.status, 'blocked');
   c.close();
+});
+
+test('two real Claude Code sessions in one folder are separate agents; closing one hands back only its task', async () => {
+  const { TeamServer } = require('../../server/server');
+  const { spawn } = require('child_process');
+  const ROOT = path.join(__dirname, '..', '..');
+  const dir = tmp();
+  const server = new TeamServer({ dataDir: path.join(dir, 'srv') });
+  const port = await server.listen(0, '127.0.0.1');
+  const SW = server.coordinator.ensureWorkspace('two-ws', { name: 'T', token: 'tok' });
+  const proj = path.join(dir, 'proj'); fs.mkdirSync(proj);
+  const conf = path.join(dir, 'claude-code.json');
+  fs.writeFileSync(conf, JSON.stringify({ TEAMCODE_URL: `http://127.0.0.1:${port}`, TEAMCODE_WORKSPACE: 'two-ws', TEAMCODE_TOKEN: 'tok', TEAMCODE_ROOT: proj, TEAMCODE_USER_ID: 'u1', TEAMCODE_USER_NAME: 'Uma', TEAMCODE_AGENT_NAME: "Uma's Claude Code", TEAMCODE_AGENT_ID: 'agt_cc_two' }));
+  const cleanEnv = (sid) => { const env = { ...process.env, CLAUDE_CODE_SESSION_ID: sid }; for (const k of Object.keys(env)) if (k.startsWith('TEAMCODE_')) delete env[k]; return env; };
+  let nextId = 1;
+  const mcp = (sid) => {
+    const p = spawn(process.execPath, [path.join(ROOT, 'src/agent/mcp-server.js'), '--config', conf], { env: cleanEnv(sid), stdio: ['pipe', 'pipe', 'ignore'] });
+    let buf = ''; const waiting = new Map();
+    p.stdout.on('data', (d) => { buf += d; let i; while ((i = buf.indexOf('\n')) >= 0) { const line = buf.slice(0, i); buf = buf.slice(i + 1); try { const m = JSON.parse(line); waiting.get(m.id)?.(m); } catch { /* not ours */ } } });
+    const tool = (name, args) => new Promise((res) => { const id = nextId++; waiting.set(id, (m) => res(m.result.content[0].text)); p.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args } }) + '\n'); });
+    return { p, tool, exited: new Promise((r) => p.on('exit', r)) };
+  };
+  const hook = (sid, input) => new Promise((res) => {
+    const h = spawn(process.execPath, [path.join(ROOT, 'src/agent/hook.js'), '--config', conf], { env: cleanEnv(sid), stdio: ['pipe', 'ignore', 'ignore'] });
+    h.on('exit', res); h.stdin.end(JSON.stringify(input));
+  });
+  const T1 = SW.call('createTask', { title: 'Export' }, user);
+  const T2 = SW.call('createTask', { title: 'Docs' }, user);
+  const A = mcp('aaaaaaaa-0000-4000-8000-000000000001');
+  const B = mcp('bbbbbbbb-0000-4000-8000-000000000002');
+  await A.tool('update_task_status', { status: 'started', task_id: T1.id });
+  await B.tool('update_task_status', { status: 'started', task_id: T2.id });
+  const ids = Object.keys(SW.state.agents).filter((k) => k.startsWith('agt_cc_two_'));
+  assert.equal(ids.length, 2, 'one agent per session');
+  assert.equal(SW.state.tasks[T1.id].status, 'running');
+  assert.equal(SW.state.tasks[T2.id].status, 'running');
+  assert.notEqual(SW.state.tasks[T1.id].assignee, SW.state.tasks[T2.id].assignee);
+  assert.match(await B.tool('update_task_status', { status: 'started', task_id: T1.id }), /working on this task/, 'B cannot take A\'s task');
+  // B's hooks attribute B's edits to B's task only.
+  fs.writeFileSync(path.join(proj, 'docs.md'), 'docs');
+  await hook('bbbbbbbb-0000-4000-8000-000000000002', { hook_event_name: 'PostToolUse', tool_name: 'Write', tool_input: { file_path: path.join(proj, 'docs.md') }, cwd: proj });
+  assert.ok(SW.state.tasks[T2.id].changes?.['docs.md']);
+  assert.ok(!SW.state.tasks[T1.id].changes?.['docs.md']);
+  // Session A closes: only its task goes back to the queue.
+  await hook('aaaaaaaa-0000-4000-8000-000000000001', { hook_event_name: 'SessionEnd', reason: 'prompt_input_exit', cwd: proj });
+  assert.equal(SW.state.tasks[T1.id].status, 'ready');
+  assert.equal(SW.state.tasks[T2.id].status, 'running');
+  assert.match(await B.tool('update_task_status', { status: 'completed', summary: 'docs done' }), /"status": "done"/);
+  A.p.stdin.end(); B.p.stdin.end();
+  await Promise.all([A.exited, B.exited]);
+  await server.close?.();
 });
 
 test('a released blocked task whose blocker was resolved meanwhile resumes as running', () => {
@@ -666,13 +696,13 @@ test('a fixed-id client\'s later work counts as someone else\'s on its earlier t
   const W = c.ensureWorkspace('later-ws', { name: 'L' });
   W.call('filePut', { path: 'a.js', baseVersion: 0, contentB64: b64('original') }, user);
   const t1 = W.call('createTask', { title: 'One', mode: 'shared' }, user);
-  W.call('registerAgent', { agentId: 'agt_cc_l', name: 'Uma\'s Claude Code', session: 's1' }, user);
-  W.call('startTask', { taskId: t1.id, agentId: 'agt_cc_l', session: 's1' }, user);
-  const edit = (text) => { W.call('fileEdited', { agentId: 'agt_cc_l', path: 'a.js', hash: sha(text), session: 's1' }, user); W.call('filePut', { path: 'a.js', baseVersion: W.state.files['a.js'].version, contentB64: b64(text) }, user); };
+  W.call('registerAgent', { agentId: 'agt_cc_l', name: 'Uma\'s Claude Code' }, user);
+  W.call('startTask', { taskId: t1.id, agentId: 'agt_cc_l' }, user);
+  const edit = (text) => { W.call('fileEdited', { agentId: 'agt_cc_l', path: 'a.js', hash: sha(text) }, user); W.call('filePut', { path: 'a.js', baseVersion: W.state.files['a.js'].version, contentB64: b64(text) }, user); };
   edit('for one');
   W.call('completeTask', { agentId: 'agt_cc_l', taskId: t1.id, summary: 'ok' }, user);
   const t2 = W.call('createTask', { title: 'Two', mode: 'shared' }, user);
-  W.call('startTask', { taskId: t2.id, agentId: 'agt_cc_l', session: 's1' }, user);
+  W.call('startTask', { taskId: t2.id, agentId: 'agt_cc_l' }, user);
   edit('for two');
   assert.ok(W.call('taskChanges', { taskId: t1.id }, user)[0].changedByOthersSince.length > 0, 'Revert of One must not wipe Two\'s work');
   assert.deepEqual(W.call('taskChanges', { taskId: t2.id }, user)[0].changedByOthersSince, []);
