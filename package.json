@@ -1,7 +1,7 @@
 {
   "name": "teamcode",
   "productName": "TeamCode",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "Code together with your team: everyone's Claude Code sees everyone's changes in real time.",
   "main": "src/main/main.js",
   "teamcode": {
