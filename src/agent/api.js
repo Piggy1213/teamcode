@@ -233,6 +233,37 @@ function mcpIdentity(cfg) {
   return live.length === 1 ? { agentId: live[0].r.agentId, name: live[0].r.name, guessed: true } : null;
 }
 
+// Another MCP client's window is the process running this server, so two servers started by the same process
+// (an app hosting several conversations, a script driving two agents) would be one agent. The first live server for
+// a window holds a small claim file; a second one running at the same time gets an id of its own.
+function claimWindow(cfg) {
+  if (!cfg.perSession || cfg.sid || !cfg.sessionsDir) return null;
+  const f = path.join(cfg.sessionsDir, `window-${String(cfg.agentId).replace(/[^A-Za-z0-9_-]/g, '')}.json`);
+  try { fs.mkdirSync(cfg.sessionsDir, { recursive: true, mode: 0o700 }); } catch { return null; }
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const fd = fs.openSync(f, 'wx', 0o600);
+      fs.writeSync(fd, JSON.stringify({ pid: process.pid }));
+      fs.closeSync(fd);
+      return { file: f };
+    } catch (e) {
+      if (e.code !== 'EEXIST') return null;
+      let holder = -1;
+      try { holder = JSON.parse(fs.readFileSync(f, 'utf8')).pid; } catch { /* being written: held */ }
+      if (holder === process.pid) return { file: f };
+      if (holder !== -1 && !alive(holder)) { try { fs.rmSync(f, { force: true }); } catch { /* raced */ } continue; }
+      break;
+    }
+  }
+  const h = crypto.createHash('sha1').update(`client:${process.ppid}:${process.pid}`).digest('hex');
+  return { agentId: `${cfg.baseAgentId}_${h.slice(0, 10)}`, name: `${cfg.baseName} (${h.slice(0, 4)})` };
+}
+
+function releaseWindow(claim) {
+  if (!claim?.file) return;
+  try { if (JSON.parse(fs.readFileSync(claim.file, 'utf8')).pid === process.pid) fs.rmSync(claim.file, { force: true }); } catch { /* gone */ }
+}
+
 // Records of Claude Code processes that are gone (crashed without SessionEnd) are cleared after a week.
 function pruneProcs(cfg) {
   if (!cfg.sessionsDir) return;
@@ -241,7 +272,7 @@ function pruneProcs(cfg) {
       const f = path.join(cfg.sessionsDir, n);
       const m = /^proc-(\d+)\.json$/.exec(n);
       let pid = m && m[1];
-      if (!pid && n.startsWith('client-')) try { pid = JSON.parse(fs.readFileSync(f, 'utf8')).pid; } catch { /* unreadable */ }
+      if (!pid && n.startsWith('window-')) try { pid = JSON.parse(fs.readFileSync(f, 'utf8')).pid; } catch { /* unreadable */ }
       if (Date.now() - fs.statSync(f).mtimeMs > 7 * 24 * 3600 * 1000 && !(pid && alive(pid))) fs.rmSync(f, { force: true });
     }
   } catch { /* no folder yet */ }
@@ -276,4 +307,4 @@ function fileHash(cfg, rel) {
   } catch { return null; }
 }
 
-module.exports = { loadConfig, post, agentCall, register, relPath, fileHash, hookIdentity, markSwitching, forgetProc, mcpIdentity, pruneProcs };
+module.exports = { loadConfig, post, agentCall, register, relPath, fileHash, hookIdentity, markSwitching, forgetProc, mcpIdentity, pruneProcs, claimWindow, releaseWindow };

@@ -3,7 +3,7 @@
 // TeamCode MCP server (stdio). Lets any MCP-capable AI agent join a TeamCode workspace and coordinate:
 // discover agents, read targeted context, receive missed updates, reserve files, publish progress,
 // decisions, blockers and interface contracts, and request coordination or review.
-const { loadConfig, agentCall, post, register, relPath, fileHash, mcpIdentity, pruneProcs } = require('./api');
+const { loadConfig, agentCall, post, register, relPath, fileHash, mcpIdentity, pruneProcs, claimWindow, releaseWindow } = require('./api');
 
 // A bad or missing config must not crash before the MCP handshake: report it from every tool instead.
 let cfg = null, cfgError = null;
@@ -13,6 +13,9 @@ let registered = null;
 // restarted after one), else the one derived from its session id, which its hooks derive too.
 let identity = null;
 if (cfg?.perSession) pruneProcs(cfg);
+// Another MCP client: a second server in the same window process gets an agent of its own (see claimWindow).
+const windowClaim = cfg ? claimWindow(cfg) : null;
+if (windowClaim?.agentId) { identity = { agentId: windowClaim.agentId, name: windowClaim.name }; Object.assign(cfg, identity); }
 function settleIdentity() {
   if (!cfg?.perSession) return;
   let id = mcpIdentity(cfg);
@@ -128,8 +131,8 @@ const TOOLS = [
   {
     name: 'request_review',
     description: 'Ask for your changes to be reviewed and integrated. Completion is not the same as approval: a human or reviewer decides.',
-    inputSchema: S({ summary: str('What changed and how it was verified') }, ['summary']),
-    run: (a) => agentCall(cfg, 'requestReview', { summary: a.summary }),
+    inputSchema: S({ summary: str('What changed and how it was verified'), task_id: str('Task id, if it is not the task you are on now (see team_status)') }, ['summary']),
+    run: (a) => agentCall(cfg, 'requestReview', { summary: a.summary, taskId: a.task_id }),
   },
   {
     name: 'update_task_status',
@@ -260,6 +263,7 @@ let ending = false;
 function end() {
   if (ending) return;
   ending = true;
+  releaseWindow(windowClaim); // first, so a restarted server in this window gets the same agent back
   if (!cfg || cfg.taskId || !registered) return process.exit(0);
   settleIdentity();
   post(cfg, 'releaseTask', { agentId: cfg.agentId, resumable: true }, 2000).catch(() => {}).finally(() => process.exit(0));

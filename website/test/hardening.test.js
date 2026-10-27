@@ -1347,3 +1347,61 @@ test('a copied request is not delivered again when the sleeping window closes; a
   assert.equal(once('agt_cc_d_oooo', 'for whoever is next'), 1);
   c.close();
 });
+
+// ---- v1.0.4 ----
+test('quitting Claude Code in its real order (server closes, then SessionEnd) still tells the next session about the task', async () => {
+  const r = await claudeRig('quitorder');
+  const T = r.SW.call('createTask', { title: 'Export CSV' }, user);
+  const S1 = 'aaaaaaaa-aaaa-4000-8000-00000000000a', S2 = 'bbbbbbbb-bbbb-4000-8000-00000000000b';
+  const m = r.mcp(S1);
+  await r.hook(S1, { hook_event_name: 'SessionStart', source: 'startup' });
+  await m.tool('update_task_status', { status: 'started', task_id: T.id });
+  await m.quit(); // Claude Code closes its MCP servers first
+  await r.hook(S1, { hook_event_name: 'SessionEnd', reason: 'prompt_input_exit' }); // then runs SessionEnd hooks
+  assert.match(await r.hook(S1, { hook_event_name: 'SessionStart', source: 'resume' }, 44444), /Export CSV/, 'claude --continue is told');
+  assert.match(await r.hook(S2, { hook_event_name: 'SessionStart', source: 'startup' }, 55555), /Export CSV/, 'a new window is told');
+  await r.close();
+});
+
+test('another client\'s window reopened right after closing is told what it left; two servers in one process are separate agents', async () => {
+  const r = await claudeRig('reopen');
+  const client = clientRig(r);
+  const X = r.SW.call('createTask', { title: 'Login page' }, user);
+  const w1 = client();
+  await w1.tool('update_task_status', { status: 'started', task_id: X.id });
+  await w1.quit();
+  const w2 = client(); // reopened at once: a new window
+  assert.match(await w2.tool('team_status', {}), /tasksYouLeft[\s\S]*Login page/);
+  await w2.quit();
+  // Two servers started by the same process (this test process).
+  const env = { ...process.env }; for (const k of Object.keys(env)) if (k.startsWith('TEAMCODE_') || k.startsWith('CLAUDE')) delete env[k];
+  const a = r.mcpWithEnv(env), b = r.mcpWithEnv(env);
+  const Y = r.SW.call('createTask', { title: 'Billing export' }, user), Z = r.SW.call('createTask', { title: 'Docs' }, user);
+  await a.tool('update_task_status', { status: 'started', task_id: Y.id });
+  await b.tool('update_task_status', { status: 'started', task_id: Z.id });
+  assert.notEqual(r.SW.state.tasks[Y.id].assignee, r.SW.state.tasks[Z.id].assignee);
+  assert.equal(r.SW.state.tasks[Y.id].status, 'running');
+  await a.quit(); await b.quit();
+  await r.close();
+});
+
+test('a task handed to someone else on the board is no longer offered back; request_review can name its task', () => {
+  const c = new Coordinator({ dataDir: tmp() });
+  const W = c.ensureWorkspace('handed-ws', { name: 'H' });
+  const T = W.call('createTask', { title: 'Export CSV' }, user);
+  W.call('registerAgent', { agentId: 'agt_cc_h_1', name: 'U (1)', perSession: true, baseId: 'agt_cc_h', userId: 'u1' }, user);
+  W.call('startTask', { taskId: T.id, agentId: 'agt_cc_h_1' }, user);
+  W.call('agentExited', { agentId: 'agt_cc_h_1', outcome: 'done' }, user);
+  W.call('registerAgent', { agentId: 'agt_cc_h_2', name: 'U (2)', perSession: true, baseId: 'agt_cc_h', userId: 'u1' }, user);
+  assert.equal(W.call('getContext', { agentId: 'agt_cc_h_2' }, user).tasksYouLeft.length, 1);
+  W.call('updateTask', { taskId: T.id, runner: 'u_bob', runnerName: 'Bob', autoStart: true }, user);
+  assert.equal(W.call('getContext', { agentId: 'agt_cc_h_2' }, user).tasksYouLeft.length, 0);
+  // A finished task sent for review by naming it.
+  const D = W.call('createTask', { title: 'Docs' }, user);
+  W.call('startTask', { taskId: D.id, agentId: 'agt_cc_h_2' }, user);
+  W.call('completeTask', { agentId: 'agt_cc_h_2', summary: 'done' }, user);
+  W.call('agentExited', { agentId: 'agt_cc_h_2', outcome: 'done' }, user);
+  W.call('registerAgent', { agentId: 'agt_cc_h_2', name: 'U (2)', perSession: true, baseId: 'agt_cc_h' }, user);
+  assert.equal(W.call('requestReview', { agentId: 'agt_cc_h_2', taskId: D.id, summary: 'please review' }, user).type, 'changes.review_requested');
+  c.close();
+});

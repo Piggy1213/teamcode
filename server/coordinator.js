@@ -502,7 +502,7 @@ class Workspace extends EventEmitter {
   _touchAgent(a, op) {
     a.lastSeen = Date.now();
     if (op !== 'heartbeat' && op !== 'releaseTask') a.lastActive = a.lastSeen;
-    const revive = a.status === 'stale' || a.status === 'offline' || (a.perSession && a.status === 'done' && op === 'heartbeat');
+    const revive = op !== 'releaseTask' && (a.status === 'stale' || a.status === 'offline' || (a.perSession && a.status === 'done' && op === 'heartbeat'));
     if (revive) {
       const from = a.status;
       a.status = a.prevStatus || 'working';
@@ -529,13 +529,16 @@ class Workspace extends EventEmitter {
 
   // The agent lets go of its task: back to the queue if it was still running or blocked under it.
   _dropTask(a, t, reason, forget = true) {
+    const mine = t.assignee === a.id;
+    const running = mine && ['running', 'blocked'].includes(t.status);
+    const waiting = mine && t.status === 'ready' && t.releasedFrom === a.id; // its server already let go (quit order)
     this._unrelease(t);
-    if (t.assignee === a.id && ['running', 'blocked'].includes(t.status)) {
+    if (running) {
       t.status = 'ready'; t.updatedAt = Date.now();
-      // A later session of the same person and folder is told it can carry on with it (see _tasksLeftFor).
-      if (a.baseId) t.leftBy = { baseId: a.baseId, agentId: a.id, name: a.name, at: Date.now() };
       this.emitEvent('task.updated', a, { task: t.id, data: { changes: { status: 'ready' }, reason } });
     }
+    // A later session of the same person and folder is told it can carry on with it (see _tasksLeftFor).
+    if ((running || waiting) && a.baseId) t.leftBy = { baseId: a.baseId, agentId: a.id, name: a.name, at: Date.now() };
     if (forget && a.taskId === t.id) a.taskId = null;
     if (a.status === 'blocked') this._setAgentStatus(a, 'working', reason); // its blocker was about that task
   }
@@ -740,7 +743,7 @@ class Workspace extends EventEmitter {
   // carrying on is an explicit step.
   _tasksLeftFor(a) {
     if (!a?.baseId) return [];
-    return Object.values(this.state.tasks).filter((t) => t.status === 'ready' && (
+    return Object.values(this.state.tasks).filter((t) => t.status === 'ready' && !(t.runner && a.userId && t.runner !== a.userId) && (
       t.leftBy?.baseId === a.baseId || // including by this same agent: claude --continue of the conversation that left it
       (t.releasedFrom && t.releasedFrom !== a.id && this.state.agents[t.releasedFrom]?.baseId === a.baseId && !ACTIVE.has(this.state.agents[t.releasedFrom].status))
     )).map((t) => ({ id: t.id, title: t.title }));
@@ -802,6 +805,7 @@ class Workspace extends EventEmitter {
   // on with it if it returns first. Otherwise the task is simply handed back.
   op_releaseTask({ agentId, resumable }) {
     const a = this.state.agents[agentId];
+    if (resumable) this._goingAway(a);
     const t = a.taskId && this.state.tasks[a.taskId];
     if (!t || t.assignee !== a.id) return null;
     // Waiting for this agent to come back (its server restarted, or the computer slept) also counts as holding it.
@@ -819,6 +823,10 @@ class Workspace extends EventEmitter {
     this.emitEvent('task.updated', a, { task: t.id, data: { changes: { status: 'ready' }, reason: `${a.name} disconnected; task returned to queue` } });
     return out;
   }
+
+  // The agent's server is going away (quitting, or restarting): it counts as away at once, so the person's other
+  // windows see what it left; if it was a restart, the agent's next call brings it straight back.
+  _goingAway(a) { if (ACTIVE.has(a.status)) this._setAgentStatus(a, 'stale', 'disconnected'); }
 
   op_setAgentStatus({ agentId, status, detail }) {
     const a = this.state.agents[agentId];
@@ -927,7 +935,10 @@ class Workspace extends EventEmitter {
     t.updatedAt = Date.now();
     const actor = this._actor(fields, ctx);
     this.emitEvent('task.updated', actor, { task: t.id, data: { changes } });
-    if ('runner' in changes) this.emitEvent('task.assigned', actor, { task: t.id, data: { runner: t.runner, runnerName: t.runnerName } });
+    if ('runner' in changes) {
+      this._unrelease(t); // handed to someone: no longer waiting for, or left by, an earlier agent
+      this.emitEvent('task.assigned', actor, { task: t.id, data: { runner: t.runner, runnerName: t.runnerName } });
+    }
     this._recomputeReadiness(actor);
     this._annotateParallelism();
     return t;
@@ -987,8 +998,9 @@ class Workspace extends EventEmitter {
     const t = this._task(taskId);
     if (agentId) this._assign(this.state.agents[agentId] || (() => { throw new CoordError('Unknown agent'); })(), taskId);
     if (runner !== undefined) {
-      t.runner = runner; t.runnerName = runnerName || null; t.updatedAt = Date.now();
-      this.emitEvent('task.assigned', this._actor({}, ctx), { task: t.id, data: { runner, runnerName } });
+      t.runner = runner ? clip(runner, 80) : null; t.runnerName = runnerName ? clip(runnerName, 60) : null; t.updatedAt = Date.now();
+      this._unrelease(t);
+      this.emitEvent('task.assigned', this._actor({}, ctx), { task: t.id, data: { runner: t.runner, runnerName: t.runnerName } });
     }
     return t;
   }
