@@ -3,7 +3,7 @@
 // TeamCode MCP server (stdio). Lets any MCP-capable AI agent join a TeamCode workspace and coordinate:
 // discover agents, read targeted context, receive missed updates, reserve files, publish progress,
 // decisions, blockers and interface contracts, and request coordination or review.
-const { loadConfig, agentCall, register, relPath, fileHash } = require('./api');
+const { loadConfig, agentCall, post, register, relPath, fileHash, recordProcessIdentity } = require('./api');
 
 // A bad or missing config must not crash before the MCP handshake: report it from every tool instead.
 let cfg = null, cfgError = null;
@@ -237,7 +237,17 @@ process.stdin.on('data', (chunk) => {
     handle(msg).catch(() => {});
   }
 });
-process.stdin.on('end', () => process.exit(0));
+// Tell this Claude Code's hooks which agent it runs as (see processIdentity in api.js).
+const idFile = cfg?.perSession ? recordProcessIdentity(cfg, process.ppid) : null;
+
+// Claude Code is quitting, or restarting this server. A task this connection was on goes back to the queue now
+// rather than after the 10-minute timeout; if this same Claude Code comes back, it carries on with it.
+process.stdin.on('end', () => {
+  // Only our own record: a restarted server for the same Claude Code may already have written its own.
+  try { if (idFile && JSON.parse(require('fs').readFileSync(idFile, 'utf8')).mcp === process.pid) require('fs').rmSync(idFile, { force: true }); } catch { /* gone */ }
+  if (!cfg || cfg.taskId || !registered) return process.exit(0);
+  post(cfg, 'releaseTask', { agentId: cfg.agentId, resumable: true }, 2000).catch(() => {}).finally(() => process.exit(0));
+});
 
 // Register immediately and keep a heartbeat so the workspace can tell live agents from stale ones.
 if (cfg) register(cfg).then((r) => { registered = r; }).catch(() => {});

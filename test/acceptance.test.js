@@ -527,7 +527,8 @@ test('Claude Code connection file: the MCP server can plan and start tasks on th
   const created = Object.values(W.state.tasks);
   assert.equal(created.length, 2);
   assert.ok(created.every((t) => t.runner === 'usr_cc' && t.autoStart === true), 'tasks are set to start on Casey\'s computer');
-  assert.ok(W.state.agents.agt_cc_test, 'registered under the fixed Claude Code identity');
+  // One agent per Claude Code session (or per process for other clients), all under the connection's id.
+  assert.ok(Object.keys(W.state.agents).some((id) => id === 'agt_cc_test' || id.startsWith('agt_cc_test_')), 'registered under the connection\'s Claude Code identity');
 
   const docs = created.find((t) => t.title === 'Docs for export');
   await W.call('updateTask', { taskId: docs.id, autoStart: false, runner: null });

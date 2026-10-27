@@ -20,7 +20,7 @@ const EVENT_TYPES = [
   'blocker.reported', 'blocker.resolved', 'contract.updated', 'coordination.requested',
 ];
 
-const AGENT_OPS = new Set(['heartbeat', 'setAgentStatus', 'agentRead', 'preEdit', 'fileEdited', 'announceEdit', 'releaseFiles', 'pullDigest', 'getUpdates']);
+const AGENT_OPS = new Set(['heartbeat', 'releaseTask', 'setAgentStatus', 'agentRead', 'preEdit', 'fileEdited', 'announceEdit', 'releaseFiles', 'pullDigest', 'getUpdates']);
 const ACTIVE = new Set(['starting', 'working', 'idle', 'waiting', 'blocked']);
 const STALE_MS = 90 * 1000;
 const OFFLINE_MS = 10 * 60 * 1000;
@@ -42,7 +42,7 @@ const GROWTH_OPS = new Set(['createTask', 'createTasks', 'chat', 'publishUpdate'
 // only these still run: reading, finishing and cleaning up work, and changes to files the project already has.
 const CEILING_OK = new Set([
   'getContract', 'checkFiles', 'pullDigest', 'getUpdates', 'getContext', 'teamStatus', 'getAgent', 'findOverlaps', 'taskChanges',
-  'fileIndex', 'fileGet', 'conflictData', 'fileHistory', 'snapshot', 'events', 'userJoined', 'userLeft', 'heartbeat', 'setAgentStatus', 'agentExited',
+  'fileIndex', 'fileGet', 'conflictData', 'fileHistory', 'snapshot', 'events', 'userJoined', 'userLeft', 'heartbeat', 'releaseTask', 'setAgentStatus', 'agentExited',
   'releaseFiles', 'completeTask', 'failTask', 'cancelTask', 'deleteTask', 'reopenTask', 'requestReview', 'reviewDecision', 'testCompleted',
   'integrationChecked', 'markMerged', 'markReverted', 'resolveBlocker', 'resolveConflictRecord', 'resolveConflict', 'fileRevert',
 ]);
@@ -56,6 +56,8 @@ const PRUNE_AFTER = 7 * 24 * 3600 * 1000; // finished agents and resolved confli
 const NOTICE_PRUNE_AFTER = 24 * 3600 * 1000; // overlap and integration-risk notices are advice; they go after a day
 const MAX_USERS = 500; // people one project remembers
 const MAX_OTHERS = 20; // other people's versions remembered per file a task changed
+const MAX_AGENTS = 1000; // agent records one project keeps; the oldest finished ones make room for new sessions
+const SESSION_PRUNE_AFTER = 24 * 3600 * 1000; // a finished Claude Code session's agent is forgotten after a day
 const HASH_RE = /^[0-9a-f]{64}$/;
 const cleanHash = (h) => (typeof h === 'string' && HASH_RE.test(h) ? h : null);
 
@@ -248,9 +250,14 @@ class Workspace extends EventEmitter {
     if (now - (this._prunedAt || 0) < 3600 * 1000) return;
     this._prunedAt = now;
     const holding = new Set(Object.values(this.state.tasks).filter((t) => t.assignee).map((t) => t.assignee));
+    // A finished Claude Code session's agent goes after a day unless it still has work it could resume (tasks it
+    // finished keep the name they were done under).
+    const live = new Set(Object.values(this.state.tasks).filter((t) => ['running', 'blocked'].includes(t.status) || t.releasedFrom).map((t) => t.assignee));
     let changed = false;
     for (const a of Object.values(this.state.agents)) {
-      if (!ACTIVE.has(a.status) && a.status !== 'stale' && now - (a.lastSeen || 0) > PRUNE_AFTER && !holding.has(a.id)) { delete this.state.agents[a.id]; changed = true; }
+      if (ACTIVE.has(a.status) || a.status === 'stale') continue;
+      const old = now - (a.lastSeen || 0);
+      if (a.perSession ? old > SESSION_PRUNE_AFTER && !live.has(a.id) : old > PRUNE_AFTER && !holding.has(a.id)) { delete this.state.agents[a.id]; changed = true; }
     }
     for (const c of Object.values(this.state.conflicts)) {
       const notice = c.kind === 'overlap' || c.kind === 'integration_risk';
@@ -489,7 +496,8 @@ class Workspace extends EventEmitter {
 
   _touchAgent(a, op) {
     a.lastSeen = Date.now();
-    if (a.status === 'stale' || a.status === 'offline') {
+    const revive = a.status === 'stale' || a.status === 'offline' || (a.perSession && a.status === 'done' && op === 'heartbeat');
+    if (revive) {
       const from = a.status;
       a.status = a.prevStatus || 'working';
       this.emitEvent('agent.status_changed', a, { task: a.taskId, data: { from, to: a.status, detail: 'reconnected' } });
@@ -547,7 +555,10 @@ class Workspace extends EventEmitter {
     // Two budgets on hosted servers. File content is checked when new bytes are stored (_putBlob), so reverts,
     // conflict resolutions and deletes always work. Records (tasks, chat, notes...) stop growing at a quarter
     // of the budget; finishing, reviewing, reopening and cleaning up are never refused.
-    const addsRecords = GROWTH_OPS.has(op) || (op === 'registerAgent' && !this.state.agents[args.agentId]);
+    // A new Claude Code session's agent is bounded by MAX_AGENTS (finished ones make way), not by the budget, so a
+    // full project can still be worked on from a new session.
+    const newAgent = op === 'registerAgent' && !this.state.agents[args.agentId];
+    const addsRecords = GROWTH_OPS.has(op) || (newAgent && !args.perSession);
     const full = this.limits.maxBytes && ((addsRecords && this.metaBytes > this.limits.maxBytes / 4) || (this.metaBytes > this.limits.maxBytes / 2 && !this._okAtCeiling(op, args, ctx)));
     if (full) throw new CoordError(`This project has reached its storage limit (${fmtBytes(this.limits.maxBytes)}) for tasks and history on this server. Delete finished tasks or old files to make room.`, 'too_large');
     if (op !== 'registerAgent') {
@@ -563,7 +574,7 @@ class Workspace extends EventEmitter {
   _okAtCeiling(op, args, ctx) {
     if (CEILING_OK.has(op)) return true;
     if (PATH_OPS.has(op)) { const ps = arr(args.path ?? args.paths); return ps.length > 0 && ps.every((p) => this.state.files[normPath(p)]); }
-    if (op === 'registerAgent') return !!this.state.agents[args.agentId];
+    if (op === 'registerAgent') return !!this.state.agents[args.agentId] || !!args.perSession;
     return false;
   }
 
@@ -600,7 +611,7 @@ class Workspace extends EventEmitter {
   }
 
   // ---------- agents ----------
-  op_registerAgent({ agentId, name, client, taskId, userId, mode, branch, cwd, perSession }, ctx) {
+  op_registerAgent({ agentId, name, client, taskId, userId, mode, branch, cwd, perSession, baseId }, ctx) {
     let a = agentId && this.state.agents[agentId];
     if (a) {
       const wasInactive = !ACTIVE.has(a.status);
@@ -622,16 +633,30 @@ class Workspace extends EventEmitter {
       const missed = this._relevantSince(a, a.cursor);
       return { agent: this._agentView(a), reconnected: true, missedCount: missed.length, missed: this._digestText(missed) };
     }
+    if (Object.keys(this.state.agents).length >= MAX_AGENTS) this._makeRoomForAgent();
+    baseId = perSession && typeof baseId === 'string' && baseId ? clip(baseId, 80) : null;
+    // A new Claude Code session picks up where the person's previous session in this folder left off: the team
+    // updates it missed are still delivered.
+    const prev = baseId && Object.values(this.state.agents).filter((o) => o.baseId === baseId || o.id === baseId).sort((x, y) => (y.lastSeen || 0) - (x.lastSeen || 0))[0];
     a = {
-      id: agentId || rid('agt'), name: name || 'Agent', client: client || 'MCP client', userId: userId || ctx.user?.id || null,
+      id: agentId || rid('agt'), name: name || 'Agent', baseId, client: client || 'MCP client', userId: userId || ctx.user?.id || null,
       taskId: null, perSession: !!perSession, status: 'working', prevStatus: 'working', detail: '', mode: mode || 'shared', branch: branch || 'main',
-      cwd: cwd || null, startedAt: Date.now(), lastSeen: Date.now(), cursor: this.state.seq, lastDigestAt: 0,
+      cwd: cwd || null, startedAt: Date.now(), lastSeen: Date.now(), cursor: prev ? Math.min(prev.cursor || 0, this.state.seq) : this.state.seq, lastDigestAt: 0,
       reads: dict(), touched: dict(), edited: dict(), warned: dict(), updates: [], contractsSeen: dict(),
     };
     this.state.agents[a.id] = a;
     this.emitEvent('agent.joined', a, { data: { client: a.client, mode: a.mode }, branch: a.branch });
     if (taskId) this._assign(a, taskId);
     return { agent: this._agentView(a), reconnected: false, missedCount: 0, missed: '' };
+  }
+
+  // Over MAX_AGENTS: forget the longest-finished agents that hold no live work. Refuse only if none can go.
+  _makeRoomForAgent() {
+    const live = new Set(Object.values(this.state.tasks).filter((t) => ['running', 'blocked'].includes(t.status) || t.releasedFrom).map((t) => t.assignee));
+    const done = Object.values(this.state.agents).filter((a) => !ACTIVE.has(a.status) && a.status !== 'stale' && !live.has(a.id)).sort((x, y) => (x.lastSeen || 0) - (y.lastSeen || 0));
+    const excess = Object.keys(this.state.agents).length - MAX_AGENTS + 1;
+    if (done.length < excess) throw new CoordError(`This project already has ${MAX_AGENTS} agents at work.`, 'full');
+    for (const a of done.slice(0, Math.max(excess, 50))) delete this.state.agents[a.id];
   }
 
   // The agent that currently has a task: it is running or blocked under that agent, and the agent is
@@ -679,6 +704,20 @@ class Workspace extends EventEmitter {
     return { ok: true, pending: this._relevantSince(a, a.cursor).length };
   }
 
+  // Lets go of the agent's task. resumable: the client is going away but may be back (its MCP server is being
+  // restarted, or Claude Code is quitting): the task goes back to the queue now, and only this agent can carry
+  // on with it if it returns first. Otherwise the task is simply handed back.
+  op_releaseTask({ agentId, resumable }) {
+    const a = this.state.agents[agentId];
+    const t = a.taskId && this.state.tasks[a.taskId];
+    if (!t || t.assignee !== a.id || !['running', 'blocked'].includes(t.status)) return false;
+    if (!resumable) { this._dropTask(a, t, `${a.name} let go of the task`); return true; }
+    t.releasedFrom = a.id; t.releasedStatus = t.status;
+    t.status = 'ready'; t.updatedAt = Date.now();
+    this.emitEvent('task.updated', a, { task: t.id, data: { changes: { status: 'ready' }, reason: `${a.name} disconnected; task returned to queue` } });
+    return true;
+  }
+
   op_setAgentStatus({ agentId, status, detail }) {
     const a = this.state.agents[agentId];
     if (!a) throw new CoordError('Unknown agent', 'unknown_agent');
@@ -714,7 +753,7 @@ class Workspace extends EventEmitter {
       id: a.id, name: a.name, client: a.client, userId: a.userId, status: a.status, detail: a.detail, mode: a.mode, branch: a.branch,
       task: t ? { id: t.id, title: t.title, status: t.status } : null, lastSeen: a.lastSeen, startedAt: a.startedAt,
       editing: files, edited: Object.keys(a.edited || {}), updates: a.updates.slice(-8), cursor: a.cursor,
-      pendingEvents: this._relevantSince(a, a.cursor).length,
+      pendingEvents: ACTIVE.has(a.status) || a.status === 'stale' ? this._relevantSince(a, a.cursor).length : 0,
     };
   }
 
@@ -1024,7 +1063,9 @@ class Workspace extends EventEmitter {
     const actor = this._actor({ agentId }, ctx);
     let target = null;
     if (to) {
-      target = this.state.agents[to] || Object.values(this.state.agents).find((a) => a.name.toLowerCase() === String(to).toLowerCase());
+      const want = String(to).toLowerCase();
+      const named = Object.values(this.state.agents).filter((a) => { const n = a.name.toLowerCase(); return n === want || (n.startsWith(`${want} (`) && n.endsWith(')')); });
+      target = this.state.agents[to] || named.sort((x, y) => Number(ACTIVE.has(y.status)) - Number(ACTIVE.has(x.status)) || (y.lastSeen || 0) - (x.lastSeen || 0))[0];
       if (!target) throw new CoordError(`No agent named "${to}". Use team_status to list agents.`);
     }
     const r = { id: rid('crd'), from: { id: actor.id, name: actor.name }, to: target ? target.id : null, toName: target?.name || null, subject: subject || 'Coordination', message: message || '', files: arr(files).map(normPath), at: Date.now(), status: 'open' };
@@ -1197,11 +1238,11 @@ class Workspace extends EventEmitter {
   }
 
   // ---------- targeted context & delivery ----------
-  _isRelevant(e, a) {
+  _isRelevant(e, a, mine) {
     if (e.actor.id === a.id) return false;
     if (['chat.message', 'user.joined', 'user.left', 'workspace.created'].includes(e.type)) return false;
     if (['decision.recorded', 'contract.updated', 'blocker.reported', 'changes.merged'].includes(e.type)) return true;
-    if (e.type === 'coordination.requested') return !e.data.to || e.data.to === a.id;
+    if (e.type === 'coordination.requested') return !e.data.to || e.data.to === a.id || (!!a.baseId && this.state.agents[e.data.to]?.baseId === a.baseId);
     if (e.type === 'conflict.detected') return (e.data.agents || []).includes(a.id) || e.files.some((f) => a.touched[f]);
     const t = a.taskId && this.state.tasks[a.taskId];
     if (t && e.task) {
@@ -1211,7 +1252,7 @@ class Workspace extends EventEmitter {
       if (other && other.dependsOn.includes(t.id) && ['task.started', 'task.blocked', 'blocker.reported'].includes(e.type)) return true;
     }
     if (e.files.length) {
-      const mine = new Set([...Object.keys(a.touched), ...(t ? t.files : [])]);
+      mine ||= new Set([...Object.keys(a.touched), ...(t ? t.files : [])]);
       if (e.files.some((f) => mine.has(f))) return true;
     }
     if (e.type === 'agent.joined' || e.type === 'task.started') return true; // concise awareness of new parallel work
@@ -1219,7 +1260,9 @@ class Workspace extends EventEmitter {
   }
 
   _relevantSince(a, cursor) {
-    return this.eventsSince(cursor || 0, 100000).filter((e) => this._isRelevant(e, a));
+    const t = a.taskId && this.state.tasks[a.taskId];
+    const mine = new Set([...Object.keys(a.touched || {}), ...(t ? t.files : [])]);
+    return this.eventsSince(cursor || 0, 100000).filter((e) => this._isRelevant(e, a, mine));
   }
 
   _urgent(e, a) {

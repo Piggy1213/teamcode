@@ -123,8 +123,6 @@ class AgentManager extends EventEmitter {
         if (merged) baseCommit = await git.head(worktree);
       } else {
         mode = 'shared';
-        // Recorded on the task too, so Review, Revert and Reject treat its changes as shared-copy work.
-        await this.conn.call('updateTask', { taskId, mode: 'shared' }).catch(() => {});
         this.log(agentId, 'system', 'Isolated mode needs a git repository with at least one commit, so this agent runs in the shared working copy instead.');
       }
     }
@@ -137,6 +135,9 @@ class AgentManager extends EventEmitter {
       throw e;
     }
     if (worktree) await this.conn.call('branchCreated', { taskId, branch, worktree, baseCommit });
+    // An isolated task that fell back to the shared copy (no git here) is recorded as shared once it has started,
+    // so Review, Revert and Reject treat its changes as shared-copy work.
+    if (mode === 'shared' && task.mode === 'isolated') await this.conn.call('updateTask', { taskId, mode: 'shared' }).catch(() => {});
     this.meta[agentId] = { agentId, name, taskId, mode, branch, worktree, baseCommit, cwd, sessionId: null, startedAt: Date.now() };
     this._saveMeta();
 

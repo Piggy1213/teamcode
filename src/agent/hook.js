@@ -8,7 +8,7 @@
 //   PostToolUse (Edit/Write/...)     -> publish file.changed; inject relevant team updates
 //   Stop                             -> don't let the agent finish while urgent team updates are unread
 // Any failure exits 0 silently so the agent is never blocked by TeamCode being unavailable.
-const { loadConfig, agentCall, post, relPath, fileHash } = require('./api');
+const { loadConfig, agentCall, post, relPath, fileHash, processIdentity } = require('./api');
 
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
 
@@ -31,16 +31,18 @@ async function main() {
   const cfg = loadConfig();
   // Personal hooks (from "Add to Claude Code") inside an agent TeamCode launched: its own hooks already run.
   if (cfg.insideAgent) return;
+  if (cfg.perSession) processIdentity(cfg, process.env, input); // same agent as this Claude Code's MCP server
   // Fall back to Claude Code's cwd only when no project root was configured (env or connection file).
   if (!process.env.TEAMCODE_ROOT && !cfg.external && input.cwd) cfg.root = input.cwd;
   const event = input.hook_event_name;
   const tool = input.tool_name;
   const file = input.tool_input?.file_path || input.tool_input?.notebook_path;
 
-  // The Claude Code session closed (or was cleared). Its agent is done; a task it was still on goes back to the
-  // queue. Only for per-session agents: an older Claude Code shares one agent between sessions.
+  // Claude Code is closing. Its agent is done; a task it was still on goes back to the queue. /clear and /resume
+  // also end a session, but the same Claude Code (and its MCP server, and its task) carries on. Only for
+  // per-session agents: an older Claude Code shares one agent between sessions.
   if (event === 'SessionEnd') {
-    if (cfg.perSession) await post(cfg, 'agentExited', { agentId: cfg.agentId, outcome: 'done', detail: 'Claude Code session ended' }, 3000).catch(() => {});
+    if (cfg.perSession && !['clear', 'resume'].includes(input.reason)) await post(cfg, 'agentExited', { agentId: cfg.agentId, outcome: 'done', detail: 'Claude Code session ended' }, 3000).catch(() => {});
     return;
   }
 
