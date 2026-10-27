@@ -260,7 +260,9 @@ class Workspace extends EventEmitter {
       const old = now - (a.lastSeen || 0);
       // Asleep ('offline') may come back: only a session that actually ended goes after a day.
       const ended = a.perSession && a.status !== 'offline';
-      if (ended ? old > SESSION_PRUNE_AFTER && !live.has(a.id) : old > PRUNE_AFTER && !(a.perSession ? live : holding).has(a.id)) { delete this.state.agents[a.id]; changed = true; }
+      if (!(ended ? old > SESSION_PRUNE_AFTER && !live.has(a.id) : old > PRUNE_AFTER && !(a.perSession ? live : holding).has(a.id))) continue;
+      if (a.perSession && old < PRUNE_AFTER && this._pendingRequests(a).length) continue; // waiting for the person's next window
+      delete this.state.agents[a.id]; changed = true;
     }
     for (const c of Object.values(this.state.conflicts)) {
       const notice = c.kind === 'overlap' || c.kind === 'integration_risk';
@@ -499,7 +501,7 @@ class Workspace extends EventEmitter {
 
   _touchAgent(a, op) {
     a.lastSeen = Date.now();
-    if (op !== 'heartbeat') a.lastActive = a.lastSeen;
+    if (op !== 'heartbeat' && op !== 'releaseTask') a.lastActive = a.lastSeen;
     const revive = a.status === 'stale' || a.status === 'offline' || (a.perSession && a.status === 'done' && op === 'heartbeat');
     if (revive) {
       const from = a.status;
@@ -617,7 +619,7 @@ class Workspace extends EventEmitter {
   }
 
   // ---------- agents ----------
-  op_registerAgent({ agentId, name, client, taskId, userId, mode, branch, cwd, perSession, baseId, takeOver }, ctx) {
+  op_registerAgent({ agentId, name, client, taskId, userId, mode, branch, cwd, perSession, baseId }, ctx) {
     let a = agentId && this.state.agents[agentId];
     // Every field an agent record keeps is bounded (new Claude Code sessions may register past the storage gate).
     name = name ? clip(name, 80) : name; client = client ? clip(client, 80) : client; cwd = cwd ? String(cwd).slice(0, 500) : cwd;
@@ -662,20 +664,6 @@ class Workspace extends EventEmitter {
       }
     }
     if (taskId) this._assign(a, taskId);
-    // A restarted MCP client (not Claude Code: one agent per client process) carries on with the task its previous
-    // process left when it quit, if nobody has taken it since.
-    if (takeOver && baseId && !a.taskId) {
-      const left = Object.values(this.state.tasks).filter((t) => t.status === 'ready' && t.releasedFrom && t.releasedFrom !== a.id && this.state.agents[t.releasedFrom]?.baseId === baseId)
-        .sort((x, y) => (y.updatedAt || 0) - (x.updatedAt || 0))[0];
-      if (left) {
-        const prev = this.state.agents[left.releasedFrom];
-        const status = left.releasedStatus === 'blocked' ? 'blocked' : 'running';
-        this._assign(a, left.id);
-        left.status = status; left.updatedAt = Date.now();
-        this.emitEvent('task.updated', a, { task: left.id, data: { changes: { status }, reason: `${a.name} took over from ${prev?.name || 'its previous run'}` } });
-        if (prev && !this._ended(prev)) this._setAgentStatus(prev, 'done', 'restarted');
-      }
-    }
     return { agent: this._agentView(a), reconnected: false, missedCount: 0, missed: '' };
   }
 
@@ -686,20 +674,34 @@ class Workspace extends EventEmitter {
   // person and folder. From a window that closed they move (to the window in use, or the next one opened). A window
   // that is only asleep keeps its own, and a newly opened window gets a copy (it may never wake up). Only those
   // requests are affected; the window's other unread updates stay where they were.
+  //
+  // Each request has one live event per recipient: state.handedOver[id] = { to, seq } names the event that carries it
+  // now (and { copy: { to, seq } } a copy given to a new window while the holder is asleep, at most one).
+  _liveRequest(e, a) {
+    const h = this.state.handedOver[e.data.id];
+    if (!h) return e.data.to === a.id;
+    return (h.to === a.id && h.seq === e.seq) || (h.copy?.to === a.id && h.copy.seq === e.seq);
+  }
+
+  _pendingRequests(a) {
+    return this.eventsSince(a.cursor || 0, 100000).filter((e) => e.type === 'coordination.requested' && e.data.to === a.id && this._liveRequest(e, a));
+  }
+
   _handOverRequests(from, to, copy = false) {
     if (!from?.baseId || !to || to.id === from.id || to.baseId !== from.baseId) return;
-    for (const e of this.eventsSince(from.cursor || 0, 100000)) {
-      if (e.type !== 'coordination.requested' || e.data.to !== from.id) continue;
+    for (const e of this._pendingRequests(from)) {
       const id = e.data.id;
-      if (this.state.handedOver[id] && this.state.handedOver[id] !== from.id) continue; // already moved on
-      if (copy && e.data.copiedTo?.includes(to.id)) continue;
-      if (!copy) {
-        this.state.handedOver[id] = to.id;
+      const h = this.state.handedOver[id] || { to: from.id, seq: e.seq };
+      if (copy && h.copy) continue; // one copy per request
+      const ev = this.emitEvent('coordination.requested', e.actor, { task: e.task, files: e.files, data: { ...e.data, to: to.id, toName: to.name, handedOverFrom: from.name } });
+      if (copy) h.copy = { to: to.id, seq: ev.seq };
+      else {
+        if (h.copy?.to === from.id) delete h.copy;
+        h.to = to.id; h.seq = ev.seq;
         const r = this.state.coordination.find((c) => c.id === id);
         if (r) { r.to = to.id; r.toName = to.name; }
       }
-      this.emitEvent('coordination.requested', e.actor, { task: e.task, files: e.files, data: { ...e.data, to: to.id, toName: to.name, handedOverFrom: from.name } });
-      if (copy) (e.data.copiedTo ||= []).push(to.id);
+      this.state.handedOver[id] = h;
     }
     const ids = Object.keys(this.state.handedOver);
     for (const k of ids.slice(0, Math.max(0, ids.length - 5000))) delete this.state.handedOver[k];
@@ -1332,12 +1334,7 @@ class Workspace extends EventEmitter {
     if (e.actor.id === a.id) return false;
     if (['chat.message', 'user.joined', 'user.left', 'workspace.created'].includes(e.type)) return false;
     if (['decision.recorded', 'contract.updated', 'blocker.reported', 'changes.merged'].includes(e.type)) return true;
-    if (e.type === 'coordination.requested') {
-      if (!e.data.to) return true;
-      if (e.data.to !== a.id) return false;
-      const moved = this.state.handedOver[e.data.id];
-      return !moved || moved === a.id; // not moved to another window since
-    }
+    if (e.type === 'coordination.requested') return !e.data.to || (e.data.to === a.id && this._liveRequest(e, a));
     if (e.type === 'conflict.detected') return (e.data.agents || []).includes(a.id) || e.files.some((f) => a.touched[f]);
     const t = a.taskId && this.state.tasks[a.taskId];
     if (t && e.task) {

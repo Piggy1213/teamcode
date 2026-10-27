@@ -536,10 +536,9 @@ test('each Claude Code session joins as its own agent; its MCP server and hooks 
   assert.equal(s1.name, "Uma's Claude Code (6faf)");
   // Older Claude Code without the variable: one agent for the folder, as before.
   assert.equal(loadConfig({ CLAUDECODE: '1' }, argv).agentId, 'agt_cc_abc');
-  // An MCP client that isn't Claude Code: one agent per client process (the same on every restart under it).
-  assert.match(loadConfig({}, argv).agentId, /^agt_cc_abc_[0-9a-f]{10}$/);
-  assert.equal(loadConfig({}, argv).agentId, loadConfig({}, argv).agentId);
-  assert.equal(loadConfig({}, argv).clientProcess, true);
+  // An MCP client that isn't Claude Code keeps one stable agent for the folder (a restart carries on with its task).
+  assert.equal(loadConfig({}, argv).agentId, 'agt_cc_abc');
+  assert.equal(loadConfig({}, argv).perSession, false);
   // An agent TeamCode launched keeps its own identity even though Claude Code sets the variable for it too.
   const inside = loadConfig({ CLAUDE_CODE_SESSION_ID: '6faf3834-95ae-4270-9138-35848b9b5a3a', TEAMCODE_AGENT_ID: 'agt_x', TEAMCODE_URL: 'http://h', TEAMCODE_WORKSPACE: 'w-ws', TEAMCODE_TOKEN: 't', TEAMCODE_TASK_ID: 'tsk_1' }, ['node', 'x.js']);
   assert.equal(inside.agentId, 'agt_x');
@@ -1194,7 +1193,7 @@ test('a window that has cleared many times still lists the session its MCP serve
   await r.close();
 });
 
-test('other MCP clients: two windows are separate agents, and a restarted client carries on with its task', async () => {
+test('another MCP client that quits and is opened again (a new process) carries on with its task', async () => {
   const r = await claudeRig('client');
   const { spawn } = require('child_process');
   const ROOT = path.join(__dirname, '..', '..');
@@ -1205,21 +1204,15 @@ test('other MCP clients: two windows are separate agents, and a restarted client
     return r.mcpWithEnv(env, ['-e', wrapper]);
   };
   const X = r.SW.call('createTask', { title: 'Login page' }, user);
-  const Y = r.SW.call('createTask', { title: 'Billing export' }, user);
-  const w1 = client(), w2 = client();
+  const w1 = client();
   await w1.tool('update_task_status', { status: 'started', task_id: X.id });
-  await w2.tool('update_task_status', { status: 'started', task_id: Y.id });
-  assert.equal(r.SW.state.tasks[X.id].status, 'running');
-  assert.equal(r.SW.state.tasks[Y.id].status, 'running');
-  assert.notEqual(r.SW.state.tasks[X.id].assignee, r.SW.state.tasks[Y.id].assignee);
   await w1.quit(); // the client quits
+  assert.equal(r.SW.state.tasks[X.id].status, 'ready');
   const w1b = client(); // and is opened again: a new process
   await w1b.tool('team_status', {});
   assert.equal(r.SW.state.tasks[X.id].status, 'running', 'carries on with its task');
   assert.match(await w1b.tool('update_task_status', { status: 'completed', summary: 'login page done' }), /"status": "done"/);
-  assert.equal(r.SW.state.tasks[X.id].status, 'done');
-  assert.equal(r.SW.state.tasks[Y.id].status, 'running', 'the other window is untouched');
-  await w1b.quit(); await w2.quit();
+  await w1b.quit();
   await r.close();
 });
 
@@ -1239,5 +1232,38 @@ test('requests for a crashed window reach the next window opened; a sleeping win
   assert.ok(d.includes('do not touch db.ts'), 'a copy of the sleeping window\'s request');
   W.call('heartbeat', { agentId: 'agt_cc_c_z' }, user); // Z was only asleep after all
   assert.ok(W.call('pullDigest', { agentId: 'agt_cc_c_z', force: true }, user).text.includes('do not touch db.ts'), 'and it still has its own');
+  c.close();
+});
+
+// ---- round 15 ----
+test('each request reaches each window once: moved back to its first window, copied at most once, kept until a window takes it', () => {
+  const c = new Coordinator({ dataDir: tmp() });
+  const W = c.ensureWorkspace('once-ws', { name: 'O' });
+  const reg = (id) => W.call('registerAgent', { agentId: id, name: `Uma's Claude Code (${id.slice(-4)})`, perSession: true, baseId: 'agt_cc_o' }, user);
+  W.call('registerAgent', { agentId: 'agt_bob', name: 'Bob' }, user);
+  const count = (id, text) => (W.call('pullDigest', { agentId: id, force: true }, user).text.match(new RegExp(text, 'g')) || []).length;
+  // Moved away and back: once.
+  reg('agt_cc_o_oooo'); reg('agt_cc_o_hhhh');
+  W.call('requestCoordination', { agentId: 'agt_bob', to: 'agt_cc_o_oooo', subject: 's', message: 'first request' }, user);
+  W.call('agentExited', { agentId: 'agt_cc_o_oooo', outcome: 'done' }, user); // moves to H
+  W.call('agentExited', { agentId: 'agt_cc_o_hhhh', outcome: 'done' }, user); // H closes unread too
+  W.call('heartbeat', { agentId: 'agt_cc_o_oooo' }, user); // O resumed (same conversation, same agent)
+  W.state.agents.agt_cc_o_oooo.status = 'working';
+  W._handOverRequests(W.state.agents.agt_cc_o_hhhh, W.state.agents.agt_cc_o_oooo);
+  assert.equal(count('agt_cc_o_oooo', 'first request'), 1);
+  // A crashed window's request: one copy, to the first window opened after it.
+  reg('agt_cc_o_zzzz');
+  W.call('requestCoordination', { agentId: 'agt_bob', to: 'agt_cc_o_zzzz', subject: 's', message: 'crashed request' }, user);
+  goOffline(W, 'agt_cc_o_zzzz');
+  reg('agt_cc_o_cccc'); reg('agt_cc_o_dddd');
+  assert.equal(count('agt_cc_o_cccc', 'crashed request'), 1);
+  assert.equal(count('agt_cc_o_dddd', 'crashed request'), 0);
+  // No window open: a closed window's request survives the one-day clean-up until the next window opens.
+  for (const id of ['agt_cc_o_oooo', 'agt_cc_o_cccc', 'agt_cc_o_dddd']) W.call('agentExited', { agentId: id, outcome: 'done' }, user);
+  W.call('requestCoordination', { agentId: 'agt_bob', to: "Uma's Claude Code", subject: 's', message: 'weekend request' }, user);
+  for (const a of Object.values(W.state.agents)) if (a.perSession) a.lastSeen = Date.now() - 2 * 24 * 3600 * 1000;
+  W._prunedAt = 0; W.sweep();
+  reg('agt_cc_o_mmmm');
+  assert.equal(count('agt_cc_o_mmmm', 'weekend request'), 1);
   c.close();
 });

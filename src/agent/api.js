@@ -40,22 +40,18 @@ function loadConfig(env = process.env, argv = process.argv) {
   // Each Claude Code process joins as an agent of its own, so two windows in one folder never share a task or
   // each other's edits. Its id comes from the session id Claude Code gives both its MCP server and its hooks
   // (kept across /clear and /resume; see hookIdentity). Claude Code too old to give a session id keeps one agent
-  // per folder. Agents TeamCode launched keep their own id.
+  // per folder, and so does any other MCP client: it has no session id or hooks to tell its windows apart, and a
+  // stable id lets a restarted client carry on with its task. Agents TeamCode launched keep their own id.
   const eligible = !insideAgent && !env.TEAMCODE_TASK_ID && (!!file || !env.TEAMCODE_AGENT_ID);
   const sid = eligible && /^[A-Za-z0-9-]{8,100}$/.test(String(env.CLAUDE_CODE_SESSION_ID || '')) ? String(env.CLAUDE_CODE_SESSION_ID) : '';
-  // Another MCP client (no CLAUDECODE): one agent per client process, so two of its windows stay apart; a restarted
-  // client takes over the task its previous process left (see takeOver in registerAgent).
-  const clientProcess = eligible && !sid && !env.CLAUDECODE;
-  const key = sid || (clientProcess ? `client:${process.ppid}` : '');
-  const perSession = !!key;
+  const perSession = !!sid;
   const baseAgentId = agentId, baseName = name;
   if (perSession) {
-    const h = crypto.createHash('sha1').update(key).digest('hex');
-    agentId = `${agentId}_${h.slice(0, 10)}`;
-    name = `${name} (${(sid || h).slice(0, 4)})`;
+    agentId = `${agentId}_${crypto.createHash('sha1').update(sid).digest('hex').slice(0, 10)}`;
+    name = `${name} (${sid.slice(0, 4)})`;
   }
   return {
-    url, workspace, token, root, name, agentId, perSession, baseAgentId, baseName, sid, clientProcess,
+    url, workspace, token, root, name, agentId, perSession, baseAgentId, baseName, sid,
     sessionsDir: file ? path.join(path.dirname(file), 'sessions') : null,
     branch: env.TEAMCODE_BRANCH || 'main', taskId: env.TEAMCODE_TASK_ID || null,
     client: env.TEAMCODE_CLIENT || 'Claude Code', userId: env.TEAMCODE_USER_ID || null, userName: env.TEAMCODE_USER_NAME || null,
@@ -103,7 +99,6 @@ function register(cfg) {
   return post(cfg, 'registerAgent', {
     agentId: cfg.agentId, name: cfg.name, client: cfg.client, taskId: cfg.taskId, userId: cfg.userId,
     mode: cfg.mode, branch: cfg.branch, cwd: cfg.root, ...(cfg.perSession ? { perSession: true, baseId: cfg.baseAgentId } : {}),
-    ...(cfg.clientProcess ? { takeOver: true } : {}),
   });
 }
 
