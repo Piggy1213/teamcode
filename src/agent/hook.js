@@ -8,7 +8,7 @@
 //   PostToolUse (Edit/Write/...)     -> publish file.changed; inject relevant team updates
 //   Stop                             -> don't let the agent finish while urgent team updates are unread
 // Any failure exits 0 silently so the agent is never blocked by TeamCode being unavailable.
-const { loadConfig, agentCall, post, relPath, fileHash, adoptIdentity, noteSwitch, takeSwitch, forgetIdentity } = require('./api');
+const { loadConfig, agentCall, post, relPath, fileHash, hookIdentity, markSwitching, forgetProc } = require('./api');
 
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
 
@@ -32,9 +32,10 @@ async function main() {
   // Personal hooks (from "Add to Claude Code") inside an agent TeamCode launched: its own hooks already run.
   if (cfg.insideAgent) return;
   const event = input.hook_event_name;
-  // A new conversation in the same Claude Code (after /clear or /resume) stays the same agent as its MCP server.
-  const switched = event === 'SessionStart' && ['clear', 'resume'].includes(input.source);
-  if (cfg.perSession) adoptIdentity(cfg, switched ? takeSwitch(cfg, process.env.CLAUDE_PID) : null);
+  // The agent this Claude Code process runs as. A new conversation in the same process (after /clear or an
+  // in-app /resume) stays that agent; `switched` is true for exactly that case.
+  const pid = process.env.CLAUDE_PID;
+  const switched = cfg.perSession && hookIdentity(cfg, pid, event === 'SessionStart' && ['clear', 'resume'].includes(input.source));
   // Fall back to Claude Code's cwd only when no project root was configured (env or connection file).
   if (!process.env.TEAMCODE_ROOT && !cfg.external && input.cwd) cfg.root = input.cwd;
   const tool = input.tool_name;
@@ -45,9 +46,9 @@ async function main() {
   // per-session agents: an older Claude Code shares one agent between sessions.
   if (event === 'SessionEnd') {
     if (!cfg.perSession) return;
-    if (['clear', 'resume'].includes(input.reason)) { noteSwitch(cfg, process.env.CLAUDE_PID); return; }
+    if (['clear', 'resume'].includes(input.reason)) { markSwitching(cfg, pid); return; }
     await post(cfg, 'agentExited', { agentId: cfg.agentId, outcome: 'done', detail: 'Claude Code session ended' }, 3000).catch(() => {});
-    forgetIdentity(cfg);
+    forgetProc(cfg, pid);
     return;
   }
 

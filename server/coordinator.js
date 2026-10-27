@@ -499,6 +499,7 @@ class Workspace extends EventEmitter {
 
   _touchAgent(a, op) {
     a.lastSeen = Date.now();
+    if (op !== 'heartbeat') a.lastActive = a.lastSeen;
     const revive = a.status === 'stale' || a.status === 'offline' || (a.perSession && a.status === 'done' && op === 'heartbeat');
     if (revive) {
       const from = a.status;
@@ -652,8 +653,28 @@ class Workspace extends EventEmitter {
     };
     this.state.agents[a.id] = a;
     this.emitEvent('agent.joined', a, { data: { client: a.client, mode: a.mode }, branch: a.branch });
+    if (baseId) for (const o of Object.values(this.state.agents)) if (o.id !== a.id && o.baseId === baseId && !ACTIVE.has(o.status) && o.status !== 'stale') this._handOverRequests(o, a);
     if (taskId) this._assign(a, taskId);
     return { agent: this._agentView(a), reconnected: false, missedCount: 0, missed: '' };
+  }
+
+  // Coordination requests addressed to a Claude Code window that closed (or went to sleep) before reading them go
+  // to another window of the same person and folder: the one in use now, or the next one they open.
+  _handOverRequests(from, to) {
+    if (!from?.baseId || !to || to.id === from.id || to.baseId !== from.baseId) return;
+    for (const e of this.eventsSince(from.cursor || 0, 100000)) {
+      if (e.type !== 'coordination.requested' || e.data.to !== from.id) continue;
+      const r = this.state.coordination.find((c) => c.id === e.data.id);
+      if (r) { r.to = to.id; r.toName = to.name; }
+      this.emitEvent('coordination.requested', e.actor, { task: e.task, files: e.files, data: { ...e.data, to: to.id, toName: to.name, handedOverFrom: from.name } });
+    }
+    from.cursor = this.state.seq; // handed over once
+  }
+
+  _heirOf(a) {
+    if (!a.baseId) return null;
+    return Object.values(this.state.agents).filter((o) => o.id !== a.id && o.baseId === a.baseId && ACTIVE.has(o.status))
+      .sort((x, y) => (y.lastActive || y.lastSeen || 0) - (x.lastActive || x.lastSeen || 0))[0] || null;
   }
 
   // Over MAX_AGENTS: forget the longest-finished agents that hold no live work. Refuse only if none can go.
@@ -716,7 +737,10 @@ class Workspace extends EventEmitter {
   op_releaseTask({ agentId, resumable }) {
     const a = this.state.agents[agentId];
     const t = a.taskId && this.state.tasks[a.taskId];
-    if (!t || t.assignee !== a.id || !['running', 'blocked'].includes(t.status)) return null;
+    if (!t || t.assignee !== a.id) return null;
+    // Waiting for this agent to come back (its server restarted, or the computer slept) also counts as holding it.
+    const held = ['running', 'blocked'].includes(t.status) || (t.status === 'ready' && t.releasedFrom === a.id);
+    if (!held || (resumable && t.status === 'ready')) return null;
     const out = { taskId: t.id, title: t.title };
     if (!resumable) {
       // Like Stop on the board: back to the queue, but not straight into another agent.
@@ -745,6 +769,7 @@ class Workspace extends EventEmitter {
     const t = a.taskId && this.state.tasks[a.taskId];
     if (t && t.assignee === a.id) this._dropTask(a, t, `${a.name} stopped`, false); // the agent still shows what it worked on
     this._setAgentStatus(a, clip(outcome || 'done', 40), clip(detail, 300));
+    this._handOverRequests(a, this._heirOf(a));
     return true;
   }
 
@@ -1077,13 +1102,16 @@ class Workspace extends EventEmitter {
     if (to) {
       const want = String(to).toLowerCase();
       const named = Object.values(this.state.agents).filter((a) => { const n = a.name.toLowerCase(); return n === want || (n.startsWith(`${want} (`) && n.endsWith(')')); });
-      target = this.state.agents[to] || named.sort((x, y) => Number(ACTIVE.has(y.status)) - Number(ACTIVE.has(x.status)) || (y.lastSeen || 0) - (x.lastSeen || 0))[0];
+      // Of a person's windows, the one they are actually using (heartbeats alone don't count).
+      target = this.state.agents[to] || named.sort((x, y) => Number(ACTIVE.has(y.status)) - Number(ACTIVE.has(x.status)) || (y.lastActive || y.lastSeen || 0) - (x.lastActive || x.lastSeen || 0))[0];
+      // A Claude Code window that has closed: the person's window in use gets it instead.
+      if (target?.perSession && !ACTIVE.has(target.status) && target.status !== 'stale') target = this._heirOf(target) || target;
       if (!target) throw new CoordError(`No agent named "${to}". Use team_status to list agents.`);
     }
     const r = { id: rid('crd'), from: { id: actor.id, name: actor.name }, to: target ? target.id : null, toName: target?.name || null, subject: subject || 'Coordination', message: message || '', files: arr(files).map(normPath), at: Date.now(), status: 'open' };
     this.state.coordination.push(r);
     this.state.coordination = this.state.coordination.slice(-200);
-    this.emitEvent('coordination.requested', actor, { task: actor.agent?.taskId, files: r.files, data: { id: r.id, to: r.to, toName: r.toName, toBase: target?.baseId || null, subject: r.subject, message: r.message } });
+    this.emitEvent('coordination.requested', actor, { task: actor.agent?.taskId, files: r.files, data: { id: r.id, to: r.to, toName: r.toName, subject: r.subject, message: r.message } });
     return r;
   }
 
@@ -1268,16 +1296,7 @@ class Workspace extends EventEmitter {
     if (e.actor.id === a.id) return false;
     if (['chat.message', 'user.joined', 'user.left', 'workspace.created'].includes(e.type)) return false;
     if (['decision.recorded', 'contract.updated', 'blocker.reported', 'changes.merged'].includes(e.type)) return true;
-    if (e.type === 'coordination.requested') {
-      if (!e.data.to || e.data.to === a.id) return true;
-      // Addressed to a Claude Code session that has since closed: the newest live session of the same person and
-      // folder takes it over (only one, and never while the addressed session is still there).
-      const to = this.state.agents[e.data.to];
-      const base = to ? to.baseId : e.data.toBase;
-      if (!a.baseId || base !== a.baseId || (to && (ACTIVE.has(to.status) || to.status === 'stale'))) return false;
-      const live = Object.values(this.state.agents).filter((o) => o.baseId === a.baseId && (ACTIVE.has(o.status) || o.status === 'stale'));
-      return live.sort((x, y) => (y.startedAt || 0) - (x.startedAt || 0))[0]?.id === a.id;
-    }
+    if (e.type === 'coordination.requested') return !e.data.to || e.data.to === a.id;
     if (e.type === 'conflict.detected') return (e.data.agents || []).includes(a.id) || e.files.some((f) => a.touched[f]);
     const t = a.taskId && this.state.tasks[a.taskId];
     if (t && e.task) {
@@ -1749,6 +1768,7 @@ class Workspace extends EventEmitter {
       else if (a.status === 'stale' && now - a.lastSeen > OFFLINE_MS) {
         this._releaseAll(a, true);
         this._setAgentStatus(a, 'offline', 'disconnected');
+        this._handOverRequests(a, this._heirOf(a));
         const t = a.taskId && this.state.tasks[a.taskId];
         if (t && ['running', 'blocked'].includes(t.status) && t.assignee === a.id) {
           // Marked, so this agent (and only this agent) can carry on with it if it comes back first.

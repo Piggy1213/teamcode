@@ -3,15 +3,24 @@
 // TeamCode MCP server (stdio). Lets any MCP-capable AI agent join a TeamCode workspace and coordinate:
 // discover agents, read targeted context, receive missed updates, reserve files, publish progress,
 // decisions, blockers and interface contracts, and request coordination or review.
-const { loadConfig, agentCall, post, register, relPath, fileHash, adoptIdentity, pruneIdentities } = require('./api');
+const { loadConfig, agentCall, post, register, relPath, fileHash, mcpIdentity, pruneProcs } = require('./api');
 
 // A bad or missing config must not crash before the MCP handshake: report it from every tool instead.
 let cfg = null, cfgError = null;
 try { cfg = loadConfig(); } catch (e) { cfgError = e.message; }
-// The agent this Claude Code runs as (the same one its hooks use, also after /clear or a restart of this server).
-let identity = null;
-if (cfg?.perSession) { pruneIdentities(cfg); adoptIdentity(cfg); identity = { agentId: cfg.agentId, name: cfg.name }; }
 let registered = null;
+// The agent this Claude Code runs as: the one its hooks recorded (also after /clear, or when this server was
+// restarted after one), else the one derived from its session id, which its hooks derive too.
+let identity = null;
+if (cfg?.perSession) pruneProcs(cfg);
+function settleIdentity() {
+  if (!cfg?.perSession) return;
+  const id = mcpIdentity(cfg) || identity;
+  if (!id) return;
+  if (id.agentId !== cfg.agentId) registered = null; // registers again under the right id
+  identity = id;
+  Object.assign(cfg, id);
+}
 
 const S = (props, required = []) => ({ type: 'object', properties: props, required, additionalProperties: false });
 const str = (description) => ({ type: 'string', description });
@@ -211,6 +220,7 @@ async function handle(msg) {
     }
     if (cfgError) return send({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: `TeamCode isn't connected: ${cfgError}` }], isError: true } });
     try {
+      settleIdentity();
       if (!registered) registered = await register(cfg);
       const result = await tool.run(params.arguments || {});
       let text = typeof result === 'string' ? result : JSON.stringify(result, null, 1);
@@ -248,12 +258,19 @@ function end() {
   if (ending) return;
   ending = true;
   if (!cfg || cfg.taskId || !registered) return process.exit(0);
+  settleIdentity();
   post(cfg, 'releaseTask', { agentId: cfg.agentId, resumable: true }, 2000).catch(() => {}).finally(() => process.exit(0));
 }
 process.stdin.on('end', end);
 process.on('SIGINT', end);
 process.on('SIGTERM', end);
 
-// Register immediately and keep a heartbeat so the workspace can tell live agents from stale ones.
-if (cfg) register(cfg).then((r) => { registered = r; }).catch(() => {});
-setInterval(() => { if (cfg) agentCall(cfg, 'heartbeat', {}).catch(() => {}); }, 30000).unref();
+// A connection added from the app registers on its first tool call or heartbeat (by then its hooks have recorded
+// which agent this Claude Code is, and a quick probe such as `claude mcp list` never shows up as an agent).
+// Anything else registers now. The heartbeat lets the workspace tell live agents from stale ones.
+if (cfg && !cfg.perSession) register(cfg).then((r) => { registered = r; }).catch(() => {});
+setInterval(() => {
+  if (!cfg) return;
+  settleIdentity();
+  agentCall(cfg, 'heartbeat', {}).then(() => { registered ||= true; }).catch(() => {});
+}, 30000).unref();

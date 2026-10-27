@@ -536,9 +536,9 @@ test('each Claude Code session joins as its own agent; its MCP server and hooks 
   assert.equal(s1.name, "Uma's Claude Code (6faf)");
   // Older Claude Code without the variable: one agent for the folder, as before.
   assert.equal(loadConfig({ CLAUDECODE: '1' }, argv).agentId, 'agt_cc_abc');
-  // An MCP client that isn't Claude Code keeps one stable agent, so restarting it keeps its task.
-  assert.equal(loadConfig({}, argv).agentId, 'agt_cc_abc');
-  assert.equal(loadConfig({}, argv).perSession, false);
+  // An MCP client that isn't Claude Code: one agent per client process, the same on every (re)start under it.
+  assert.match(loadConfig({}, argv).agentId, /^agt_cc_abc_[0-9a-f]{10}$/);
+  assert.equal(loadConfig({}, argv).agentId, loadConfig({}, argv).agentId);
   // An agent TeamCode launched keeps its own identity even though Claude Code sets the variable for it too.
   const inside = loadConfig({ CLAUDE_CODE_SESSION_ID: '6faf3834-95ae-4270-9138-35848b9b5a3a', TEAMCODE_AGENT_ID: 'agt_x', TEAMCODE_URL: 'http://h', TEAMCODE_WORKSPACE: 'w-ws', TEAMCODE_TOKEN: 't', TEAMCODE_TASK_ID: 'tsk_1' }, ['node', 'x.js']);
   assert.equal(inside.agentId, 'agt_x');
@@ -835,6 +835,10 @@ test('Stop on a task the server already put back in the queue turns off auto-sta
 });
 
 // ---- round 10: identity per Claude Code process ----
+// Every process a rig starts is stopped when the file's tests end, even after a failed assertion.
+const rigChildren = new Set();
+test.after(() => { for (const p of rigChildren) try { p.kill('SIGKILL'); } catch { /* gone */ } });
+
 async function claudeRig(name) {
   const { TeamServer } = require('../../server/server');
   const { spawn } = require('child_process');
@@ -850,6 +854,7 @@ async function claudeRig(name) {
   let nextId = 1;
   const mcpWithEnv = (e) => {
     const p = spawn(process.execPath, [path.join(ROOT, 'src/agent/mcp-server.js'), '--config', conf], { env: e, stdio: ['pipe', 'pipe', 'ignore'] });
+    rigChildren.add(p); p.on('exit', () => rigChildren.delete(p));
     let buf = ''; const waiting = new Map();
     p.stdout.on('data', (d) => { buf += d; let i; while ((i = buf.indexOf('\n')) >= 0) { const line = buf.slice(0, i); buf = buf.slice(i + 1); try { const m = JSON.parse(line); waiting.get(m.id)?.(m); } catch { /* not ours */ } } });
     const tool = (tname, args) => new Promise((res) => { const id = nextId++; waiting.set(id, (m) => res(m.result.content[0].text)); p.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name: tname, arguments: args } }) + '\n'); });
@@ -857,13 +862,13 @@ async function claudeRig(name) {
   };
   const mcp = (sid) => mcpWithEnv(env(sid));
   // Hooks of the Claude Code process whose child the MCP servers are (this test process).
-  const hook = (sid, input) => new Promise((res) => {
-    const h = spawn(process.execPath, [path.join(ROOT, 'src/agent/hook.js'), '--config', conf], { env: env(sid, { CLAUDE_PID: String(process.pid) }), stdio: ['pipe', 'pipe', 'ignore'] });
+  const hook = (sid, input, pid = process.pid) => new Promise((res) => {
+    const h = spawn(process.execPath, [path.join(ROOT, 'src/agent/hook.js'), '--config', conf], { env: env(sid, { CLAUDE_PID: String(pid) }), stdio: ['pipe', 'pipe', 'ignore'] });
     let out = ''; h.stdout.on('data', (d) => { out += d; });
     h.on('exit', () => res(out)); h.stdin.end(JSON.stringify({ session_id: sid, cwd: proj, ...input }));
   });
   const agents = () => Object.values(SW.state.agents).filter((a) => a.id.startsWith('agt_cc_rig'));
-  return { server, SW, proj, mcp, mcpWithEnv, hook, agents, close: () => server.close?.() };
+  return { server, SW, proj, conf, mcp, mcpWithEnv, hook, agents, close: () => server.close?.() };
 }
 
 test('/clear: same agent, the old task goes back to the queue and the new conversation is told; picking it up again records its edits', async () => {
@@ -992,5 +997,93 @@ test('a sleeping Claude Code session is kept; agent records stay small even when
   const big = 'x'.repeat(60000);
   W.call('registerAgent', { agentId: 'agt_cc_k_2', name: big, client: big, cwd: big, branch: big, mode: big, userId: big, perSession: true, baseId: 'agt_cc_k' }, user);
   assert.ok(JSON.stringify(W.state.agents.agt_cc_k_2).length < 3000);
+  c.close();
+});
+
+// ---- round 12: one record per Claude Code process ----
+test('a window that resumes another window\'s conversation stays its own agent, and quitting it leaves the other alone', async () => {
+  const r = await claudeRig('resume2');
+  const A = 'aaaaaaaa-2222-4000-8000-00000000000a', B = 'bbbbbbbb-2222-4000-8000-00000000000b', D = 'dddddddd-2222-4000-8000-00000000000d';
+  const W1 = 11111, W2 = 22222;
+  await r.hook(A, { hook_event_name: 'SessionStart', source: 'startup' }, W1);
+  await r.hook(A, { hook_event_name: 'SessionEnd', reason: 'clear' }, W1);
+  await r.hook(B, { hook_event_name: 'SessionStart', source: 'clear' }, W1);
+  await r.hook(D, { hook_event_name: 'SessionStart', source: 'startup' }, W2);
+  await r.hook(D, { hook_event_name: 'SessionEnd', reason: 'resume' }, W2);
+  await r.hook(A, { hook_event_name: 'SessionStart', source: 'resume' }, W2); // W2 opens W1's old conversation
+  fs.writeFileSync(path.join(r.proj, 'w2.js'), 'w2');
+  await r.hook(A, { hook_event_name: 'PostToolUse', tool_name: 'Write', tool_input: { file_path: path.join(r.proj, 'w2.js') } }, W2);
+  const w1 = r.agents().find((a) => a.name.endsWith('(aaaa)')), w2 = r.agents().find((a) => a.name.endsWith('(dddd)'));
+  assert.ok(w1 && w2 && w1.id !== w2.id);
+  assert.ok(w2.edited['w2.js'] && !w1.edited['w2.js'], 'W2\'s edit is W2\'s');
+  await r.hook(A, { hook_event_name: 'SessionEnd', reason: 'prompt_input_exit' }, W2);
+  assert.equal(r.SW.state.agents[w2.id].status, 'done');
+  assert.equal(r.SW.state.agents[w1.id].status, 'working', 'W1 is untouched');
+  await r.close();
+});
+
+test('claude --continue in a new terminal does not take the live window\'s agent or its task', async () => {
+  const r = await claudeRig('continue');
+  const T = r.SW.call('createTask', { title: 'Job' }, user);
+  const X = 'eeeeeeee-3333-4000-8000-00000000000e';
+  const m = r.mcp(X); // window 1's server (this test process is window 1)
+  await r.hook(X, { hook_event_name: 'SessionStart', source: 'startup' });
+  await m.tool('update_task_status', { status: 'started', task_id: T.id });
+  const brief = await r.hook(X, { hook_event_name: 'SessionStart', source: 'resume' }, 33333); // a new process, same conversation
+  assert.ok(!/Before this conversation started/.test(brief), 'not told it left a task');
+  assert.equal(r.SW.state.tasks[T.id].status, 'running');
+  fs.writeFileSync(path.join(r.proj, 'p2.js'), 'p2');
+  await r.hook(X, { hook_event_name: 'PostToolUse', tool_name: 'Write', tool_input: { file_path: path.join(r.proj, 'p2.js') } }, 33333);
+  assert.ok(!r.SW.state.tasks[T.id].changes?.['p2.js'], 'the new process\'s edits are not window 1\'s task');
+  assert.equal(r.agents().length, 2);
+  await m.quit();
+  await r.close();
+});
+
+test('/clear after a server restart lets go of the task waiting for the agent, instead of quietly resuming it', async () => {
+  const r = await claudeRig('clrwait');
+  const T = r.SW.call('createTask', { title: 'Waiting job' }, user);
+  r.SW.call('updateTask', { taskId: T.id, autoStart: true, runner: 'u1' }, user);
+  const A = 'aaaaaaaa-4444-4000-8000-00000000000a', B = 'bbbbbbbb-4444-4000-8000-00000000000b';
+  await r.hook(A, { hook_event_name: 'SessionStart', source: 'startup' });
+  const m1 = r.mcp(A);
+  await m1.tool('update_task_status', { status: 'started', task_id: T.id });
+  await m1.quit(); // released, waiting for this agent
+  assert.equal(r.SW.state.tasks[T.id].releasedFrom !== undefined, true);
+  await r.hook(A, { hook_event_name: 'SessionEnd', reason: 'clear' });
+  const brief = await r.hook(B, { hook_event_name: 'SessionStart', source: 'clear' });
+  assert.match(brief, /Waiting job/);
+  await r.hook(B, { hook_event_name: 'UserPromptSubmit' });
+  assert.equal(r.SW.state.tasks[T.id].status, 'ready', 'not picked back up by the next hook');
+  assert.equal(r.SW.state.tasks[T.id].autoStart, false);
+  await r.close();
+});
+
+test('records of running windows are kept however old; records of dead processes go', () => {
+  const { pruneProcs } = require('../../src/agent/api');
+  const dir = tmp();
+  const cfg = { sessionsDir: dir, baseAgentId: 'agt_cc_z' };
+  const old = new Date(Date.now() - 10 * 24 * 3600 * 1000);
+  for (const pid of [process.pid, 999999]) { fs.writeFileSync(path.join(dir, `proc-${pid}.json`), '{}'); fs.utimesSync(path.join(dir, `proc-${pid}.json`), old, old); }
+  pruneProcs(cfg);
+  assert.ok(fs.existsSync(path.join(dir, `proc-${process.pid}.json`)));
+  assert.ok(!fs.existsSync(path.join(dir, 'proc-999999.json')));
+});
+
+test('a request sent to a window that closes unread goes to the window in use, or to the next one opened', () => {
+  const c = new Coordinator({ dataDir: tmp() });
+  const W = c.ensureWorkspace('handover-ws', { name: 'H' });
+  W.call('registerAgent', { agentId: 'agt_cc_h_a', name: "Uma's Claude Code (aaaa)", perSession: true, baseId: 'agt_cc_h' }, user);
+  W.call('registerAgent', { agentId: 'agt_cc_h_b', name: "Uma's Claude Code (bbbb)", perSession: true, baseId: 'agt_cc_h' }, user);
+  W.call('registerAgent', { agentId: 'agt_bob', name: 'Bob' }, user);
+  W.call('requestCoordination', { agentId: 'agt_bob', to: 'agt_cc_h_a', subject: 's', message: 'please leave api.ts alone' }, user);
+  W.call('pullDigest', { agentId: 'agt_cc_h_b', force: true }, user); // B is busy and moves past it
+  W.call('agentExited', { agentId: 'agt_cc_h_a', outcome: 'done' }, user); // A closes without reading it
+  assert.ok(W.call('pullDigest', { agentId: 'agt_cc_h_b', force: true }, user).text.includes('please leave api.ts alone'));
+  // No window open when the addressee closes: the next one opened gets it.
+  W.call('requestCoordination', { agentId: 'agt_bob', to: 'agt_cc_h_b', subject: 's', message: 'ping second' }, user);
+  W.call('agentExited', { agentId: 'agt_cc_h_b', outcome: 'done' }, user);
+  W.call('registerAgent', { agentId: 'agt_cc_h_c', name: "Uma's Claude Code (cccc)", perSession: true, baseId: 'agt_cc_h' }, user);
+  assert.ok(W.call('pullDigest', { agentId: 'agt_cc_h_c', force: true }, user).text.includes('ping second'));
   c.close();
 });
