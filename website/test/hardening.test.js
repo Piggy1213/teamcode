@@ -837,8 +837,11 @@ test('Stop on a task the server already put back in the queue turns off auto-sta
 
 // ---- round 10: identity per Claude Code process ----
 // Every process a rig starts is stopped when the file's tests end, even after a failed assertion.
-const rigChildren = new Set();
-test.after(() => { for (const p of rigChildren) try { p.kill('SIGKILL'); } catch { /* gone */ } });
+const rigChildren = new Set(), rigServers = new Set();
+test.after(() => {
+  for (const p of rigChildren) try { p.kill('SIGKILL'); } catch { /* gone */ }
+  for (const srv of rigServers) try { srv.close(); } catch { /* closed */ }
+});
 
 async function claudeRig(name) {
   const { TeamServer } = require('../../server/server');
@@ -847,6 +850,7 @@ async function claudeRig(name) {
   const dir = tmp();
   const server = new TeamServer({ dataDir: path.join(dir, 'srv') });
   const port = await server.listen(0, '127.0.0.1');
+  rigServers.add(server);
   const SW = server.coordinator.ensureWorkspace(`${name}-ws`, { name, token: 'tok' });
   const proj = path.join(dir, 'proj'); fs.mkdirSync(proj);
   const conf = path.join(dir, 'claude-code.json');
@@ -924,11 +928,10 @@ test('/clear and then a restart of the MCP server: still the same agent, and it 
   await r.close();
 });
 
-test('an MCP client that is not Claude Code keeps its task across a restart', async () => {
+test('an MCP client that is not Claude Code: after a restart its task is offered back, and it carries on explicitly', async () => {
   const r = await claudeRig('other');
   const T = r.SW.call('createTask', { title: 'Job' }, user);
   const spawnOther = () => {
-    const { spawn } = require('child_process');
     const env = { ...process.env }; for (const k of Object.keys(env)) if (k.startsWith('TEAMCODE_') || k.startsWith('CLAUDE')) delete env[k];
     return r.mcpWithEnv(env);
   };
@@ -936,8 +939,8 @@ test('an MCP client that is not Claude Code keeps its task across a restart', as
   await c1.tool('update_task_status', { status: 'started', task_id: T.id });
   await c1.quit();
   const c2 = spawnOther();
-  await c2.tool('team_status', {});
-  assert.equal(r.SW.state.tasks[T.id].status, 'running');
+  assert.match(await c2.tool('team_status', {}), /tasksYouLeft[\s\S]*Job/);
+  await c2.tool('update_task_status', { status: 'started', task_id: T.id });
   assert.match(await c2.tool('update_task_status', { status: 'completed', summary: 'ok' }), /"status": "done"/);
   await c2.quit();
   await r.close();
@@ -1209,7 +1212,6 @@ test('another MCP client that quits and is opened again (a new process) carries 
   await w1.tool('update_task_status', { status: 'started', task_id: X.id });
   await w1.quit(); // the client quits
   assert.equal(r.SW.state.tasks[X.id].status, 'ready');
-  r.SW.state.agents[r.SW.state.tasks[X.id].releasedFrom].lastSeen = Date.now() - 30 * 60 * 1000; r.SW.sweep(); r.SW.sweep();
   const w1b = client(); // and is opened again: a new process, so a new agent
   assert.match(await w1b.tool('team_status', {}), /tasksYouLeft[\s\S]*Login page/, 'told about the task it left');
   assert.match(await w1b.tool('update_task_status', { status: 'completed', summary: 'x' }), /not on a TeamCode task[\s\S]*Login page/, 'and reminded instead of an obscure error');
@@ -1403,5 +1405,58 @@ test('a task handed to someone else on the board is no longer offered back; requ
   W.call('agentExited', { agentId: 'agt_cc_h_2', outcome: 'done' }, user);
   W.call('registerAgent', { agentId: 'agt_cc_h_2', name: 'U (2)', perSession: true, baseId: 'agt_cc_h' }, user);
   assert.equal(W.call('requestReview', { agentId: 'agt_cc_h_2', taskId: D.id, summary: 'please review' }, user).type, 'changes.review_requested');
+  c.close();
+});
+
+// ---- v1.0.5 ----
+test('/clear while TeamCode is unreachable: the hand-back is retried by the next hook, and the conversation is told', async () => {
+  const r = await claudeRig('offline');
+  const T = r.SW.call('createTask', { title: 'Export CSV' }, user);
+  const A = 'aaaaaaaa-cccc-4000-8000-00000000000a', B = 'bbbbbbbb-cccc-4000-8000-00000000000b';
+  const m = r.mcp(A);
+  await r.hook(A, { hook_event_name: 'SessionStart', source: 'startup' });
+  await m.tool('update_task_status', { status: 'started', task_id: T.id });
+  const good = fs.readFileSync(r.conf, 'utf8');
+  fs.writeFileSync(r.conf, good.replace(/127\.0\.0\.1:\d+/, '127.0.0.1:9')); // the app is closed
+  await r.hook(A, { hook_event_name: 'SessionEnd', reason: 'clear' });
+  await r.hook(B, { hook_event_name: 'SessionStart', source: 'clear' });
+  fs.writeFileSync(r.conf, good); // back
+  assert.equal(r.SW.state.tasks[T.id].status, 'running');
+  const out = await r.hook(B, { hook_event_name: 'UserPromptSubmit' });
+  assert.equal(r.SW.state.tasks[T.id].status, 'ready', 'handed back once TeamCode is reachable');
+  assert.match(out, /Export CSV/, 'and the conversation is told');
+  fs.writeFileSync(path.join(r.proj, 'new-topic.js'), 'x');
+  await r.hook(B, { hook_event_name: 'PostToolUse', tool_name: 'Write', tool_input: { file_path: path.join(r.proj, 'new-topic.js') } });
+  assert.ok(!r.SW.state.tasks[T.id].changes?.['new-topic.js']);
+  await m.quit();
+  await r.close();
+});
+
+test('a fixed-id client (older Claude Code) keeps its task through a restart of its server', async () => {
+  const r = await claudeRig('fixed');
+  const T = r.SW.call('createTask', { title: 'Job' }, user);
+  const env = { ...process.env, CLAUDECODE: '1' }; for (const k of Object.keys(env)) if (k.startsWith('TEAMCODE_') || k === 'CLAUDE_CODE_SESSION_ID' || k === 'CLAUDE_PID') delete env[k];
+  const c1 = r.mcpWithEnv(env);
+  await c1.tool('update_task_status', { status: 'started', task_id: T.id });
+  await c1.quit();
+  const c2 = r.mcpWithEnv(env);
+  await c2.tool('team_status', {});
+  assert.equal(r.SW.state.tasks[T.id].status, 'running');
+  await c2.quit();
+  await r.close();
+});
+
+test('a task whose "Run on" is a teammate is still offered back to whoever left it; quitting logs no false reconnect', () => {
+  const c = new Coordinator({ dataDir: tmp() });
+  const W = c.ensureWorkspace('runner2-ws', { name: 'R' });
+  const T = W.call('createTask', { title: 'Export CSV', runner: 'u_bob' }, user);
+  W.call('updateTask', { taskId: T.id, runner: 'u_bob', runnerName: 'Bob' }, user);
+  W.call('registerAgent', { agentId: 'agt_cc_r_1', name: 'Alice (1)', perSession: true, baseId: 'agt_cc_r', userId: 'u1' }, user);
+  W.call('startTask', { taskId: T.id, agentId: 'agt_cc_r_1' }, user);
+  W.call('releaseTask', { agentId: 'agt_cc_r_1', resumable: true }, user); // the MCP server closes first
+  W.call('agentExited', { agentId: 'agt_cc_r_1', outcome: 'done' }, user); // then SessionEnd
+  assert.ok(!W.events.slice(-6).some((e) => e.type === 'agent.status_changed' && e.data.detail === 'reconnected'), 'no false reconnect');
+  W.call('registerAgent', { agentId: 'agt_cc_r_2', name: 'Alice (2)', perSession: true, baseId: 'agt_cc_r', userId: 'u1' }, user);
+  assert.deepEqual(W.call('getContext', { agentId: 'agt_cc_r_2' }, user).tasksYouLeft.map((t) => t.title), ['Export CSV']);
   c.close();
 });

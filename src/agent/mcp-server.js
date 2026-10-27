@@ -266,7 +266,10 @@ function end() {
   releaseWindow(windowClaim); // first, so a restarted server in this window gets the same agent back
   if (!cfg || cfg.taskId || !registered) return process.exit(0);
   settleIdentity();
-  post(cfg, 'releaseTask', { agentId: cfg.agentId, resumable: true }, 2000).catch(() => {}).finally(() => process.exit(0));
+  // Claude Code (a session id) and fixed-id clients come back as the same agent and carry on. A window of another
+  // client can't be told apart from a different conversation in that window, so its task is offered back instead.
+  const how = cfg.perSession && !cfg.sid ? { offer: true } : { resumable: true };
+  post(cfg, 'releaseTask', { agentId: cfg.agentId, ...how }, 2000).catch(() => {}).finally(() => process.exit(0));
 }
 process.stdin.on('end', end);
 process.on('SIGINT', end);

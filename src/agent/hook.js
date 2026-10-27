@@ -8,7 +8,7 @@
 //   PostToolUse (Edit/Write/...)     -> publish file.changed; inject relevant team updates
 //   Stop                             -> don't let the agent finish while urgent team updates are unread
 // Any failure exits 0 silently so the agent is never blocked by TeamCode being unavailable.
-const { loadConfig, agentCall, post, relPath, fileHash, hookIdentity, markSwitching, forgetProc } = require('./api');
+const { loadConfig, agentCall, post, relPath, fileHash, hookIdentity, pendingRelease, markSwitching, forgetProc } = require('./api');
 
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
 
@@ -33,12 +33,22 @@ async function main() {
   if (cfg.insideAgent) return;
   const event = input.hook_event_name;
   // The agent this Claude Code process runs as. A new conversation in the same process (after /clear or an
-  // in-app /resume) stays that agent; `switched` is true for exactly that case.
+  // in-app /resume) stays that agent. /branch starts a forked conversation in the same process too (source 'fork'):
+  // same agent, and it keeps its task, since the branch carries the same conversation on.
   const pid = process.env.CLAUDE_PID;
-  // /branch starts a forked conversation in the same process too (source 'fork'): same agent, and it keeps its task,
-  // since the branch carries the same conversation on.
-  const switched = cfg.perSession && hookIdentity(cfg, pid, event === 'SessionStart' && ['clear', 'resume', 'fork'].includes(input.source));
-  const leftConversation = switched && input.source !== 'fork';
+  if (cfg.perSession) hookIdentity(cfg, pid, event === 'SessionStart' && ['clear', 'resume', 'fork'].includes(input.source), input.source !== 'fork');
+  // After /clear or /resume the previous conversation's task goes back to the queue (not restarted on its own), and
+  // this conversation is told, in case the person wants to carry on with it here. If TeamCode can't be reached at
+  // that moment, the next hook tries again.
+  let notice = '';
+  const pending = cfg.perSession && event !== 'SessionEnd' ? pendingRelease(cfg, pid) : null;
+  if (pending) {
+    try {
+      const left = await agentCall(cfg, 'releaseTask', {}, 4000);
+      pending.done();
+      if (left?.taskId) notice = `Before this conversation started, you were working on the TeamCode task "${left.title}" (${left.taskId}). It has gone back to the queue. If the person wants to continue it here, call update_task_status with status "started" and task_id "${left.taskId}".`;
+    } catch { /* not reachable: kept pending */ }
+  }
   // Fall back to Claude Code's cwd only when no project root was configured (env or connection file).
   if (!process.env.TEAMCODE_ROOT && !cfg.external && input.cwd) cfg.root = input.cwd;
   const tool = input.tool_name;
@@ -74,21 +84,19 @@ async function main() {
       await agentCall(cfg, 'fileEdited', { path: rel, hash, deleted: hash === null }, 4000);
     }
     const d = await agentCall(cfg, 'pullDigest', {}, 4000);
-    if (d.text) out({ hookSpecificOutput: { hookEventName: 'PostToolUse', additionalContext: d.text } });
+    const text = [notice, d.text].filter(Boolean).join('\n\n');
+    if (text) out({ hookSpecificOutput: { hookEventName: 'PostToolUse', additionalContext: text } });
     return;
   }
 
   if (event === 'SessionStart' || event === 'UserPromptSubmit') {
-    const parts = [];
+    const parts = notice && event === 'UserPromptSubmit' ? [notice] : [];
     if (event === 'SessionStart') {
-      // A task the previous conversation was on isn't this one's: back to the queue (not restarted on its own), and
-      // this conversation is told, in case the person wants to carry on with it here.
-      const left = leftConversation ? await agentCall(cfg, 'releaseTask', {}, 4000).catch(() => null) : null;
       const ctx = await agentCall(cfg, 'getContext', {}, 5000);
       parts.push(`You are "${cfg.name}", one of several AI agents working on this project at the same time through TeamCode. Use the teamcode MCP tools to stay coordinated (get_context, check_files, announce_edit, publish_update, publish_contract, request_coordination).`);
-      if (left?.taskId) parts.push(`Before this conversation started, you were working on the TeamCode task "${left.title}" (${left.taskId}). It has gone back to the queue. If the person wants to continue it here, call update_task_status with status "started" and task_id "${left.taskId}".`);
+      if (notice) parts.push(notice);
       // Tasks an earlier session left (e.g. this conversation resumed with claude --continue after quitting).
-      const earlier = (ctx.tasksYouLeft || []).filter((t) => t.id !== left?.taskId);
+      const earlier = (ctx.tasksYouLeft || []).filter((t) => !notice.includes(t.id));
       if (earlier.length) parts.push(`An earlier session of yours left ${earlier.length === 1 ? 'this task' : 'these tasks'} in the queue: ${earlier.map((t) => `"${t.title}" (${t.id})`).join(', ')}. To carry on with one, call update_task_status with status "started" and its task_id.`);
       if (ctx.activeAgents?.length) parts.push('Other active agents:\n' + ctx.activeAgents.map((a) => `- ${a.name}: ${a.task || 'no task'} (${a.status})${a.editing.length ? ` editing ${a.editing.slice(0, 5).join(', ')}` : ''}`).join('\n'));
       if (ctx.decisions?.length) parts.push('Team decisions:\n' + ctx.decisions.map((d) => `- ${d.title}: ${d.decision}`).join('\n'));

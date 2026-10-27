@@ -502,7 +502,8 @@ class Workspace extends EventEmitter {
   _touchAgent(a, op) {
     a.lastSeen = Date.now();
     if (op !== 'heartbeat' && op !== 'releaseTask') a.lastActive = a.lastSeen;
-    const revive = op !== 'releaseTask' && (a.status === 'stale' || a.status === 'offline' || (a.perSession && a.status === 'done' && op === 'heartbeat'));
+    // Letting go and exiting aren't signs of life: an agent on its way out isn't revived by them.
+    const revive = op !== 'releaseTask' && op !== 'agentExited' && (a.status === 'stale' || a.status === 'offline' || (a.perSession && a.status === 'done' && op === 'heartbeat'));
     if (revive) {
       const from = a.status;
       a.status = a.prevStatus || 'working';
@@ -541,6 +542,7 @@ class Workspace extends EventEmitter {
     if ((running || waiting) && a.baseId) t.leftBy = { baseId: a.baseId, agentId: a.id, name: a.name, at: Date.now() };
     if (forget && a.taskId === t.id) a.taskId = null;
     if (a.status === 'blocked') this._setAgentStatus(a, 'working', reason); // its blocker was about that task
+    else if (a.prevStatus === 'blocked') a.prevStatus = 'working'; // away now; it comes back working, not blocked
   }
 
   // Whatever happens to a task after the sweep released it (started, reassigned, reopened, finished...)
@@ -743,7 +745,7 @@ class Workspace extends EventEmitter {
   // carrying on is an explicit step.
   _tasksLeftFor(a) {
     if (!a?.baseId) return [];
-    return Object.values(this.state.tasks).filter((t) => t.status === 'ready' && !(t.runner && a.userId && t.runner !== a.userId) && (
+    return Object.values(this.state.tasks).filter((t) => t.status === 'ready' && (
       t.leftBy?.baseId === a.baseId || // including by this same agent: claude --continue of the conversation that left it
       (t.releasedFrom && t.releasedFrom !== a.id && this.state.agents[t.releasedFrom]?.baseId === a.baseId && !ACTIVE.has(this.state.agents[t.releasedFrom].status))
     )).map((t) => ({ id: t.id, title: t.title }));
@@ -803,15 +805,19 @@ class Workspace extends EventEmitter {
   // Lets go of the agent's task. resumable: the client is going away but may be back (its MCP server is being
   // restarted, or Claude Code is quitting): the task goes back to the queue now, and only this agent can carry
   // on with it if it returns first. Otherwise the task is simply handed back.
-  op_releaseTask({ agentId, resumable }) {
+  // offer: the client is going away and can't be recognised when it comes back (another MCP client's window): the
+  // task goes back to the queue and is offered to the person's sessions (tasksYouLeft), autoStart untouched.
+  op_releaseTask({ agentId, resumable, offer }) {
     const a = this.state.agents[agentId];
-    if (resumable) this._goingAway(a);
+    const leaving = resumable || offer;
+    if (leaving && a.perSession) this._goingAway(a); // fixed-id agents keep their task through a restart
     const t = a.taskId && this.state.tasks[a.taskId];
     if (!t || t.assignee !== a.id) return null;
     // Waiting for this agent to come back (its server restarted, or the computer slept) also counts as holding it.
     const held = ['running', 'blocked'].includes(t.status) || (t.status === 'ready' && t.releasedFrom === a.id);
-    if (!held || (resumable && t.status === 'ready')) return null;
+    if (!held || (leaving && t.status === 'ready')) return null;
     const out = { taskId: t.id, title: t.title };
+    if (offer) { this._dropTask(a, t, `${a.name} disconnected; task returned to queue`); return out; }
     if (!resumable) {
       // Like Stop on the board: back to the queue, but not straight into another agent.
       if (t.autoStart) { t.autoStart = false; this.emitEvent('task.updated', a, { task: t.id, data: { changes: { autoStart: false } } }); }

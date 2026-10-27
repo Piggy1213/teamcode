@@ -153,7 +153,10 @@ const alive = (pid) => { try { process.kill(Number(pid), 0); return true; } catc
 
 // Hooks. switching: this is SessionStart after /clear or /resume. Returns whether the conversation changed
 // inside the same Claude Code (the caller then lets go of the previous conversation's task).
-function hookIdentity(cfg, pid, switching) {
+// releases: a switch that leaves the previous conversation's task behind (not /branch). That hand-back stays pending
+// in the record until the server confirms it (see pendingRelease), so it isn't lost when TeamCode can't be
+// reached at that moment.
+function hookIdentity(cfg, pid, switching, releases = true) {
   if (!cfg.perSession || !cfg.sid || !procFile(cfg, pid)) return false;
   let r = readProc(cfg, pid), switched = false, changed = false;
   if (r === UNREADABLE) return false; // derived id for this call; the record is left alone
@@ -163,6 +166,7 @@ function hookIdentity(cfg, pid, switching) {
     switched = true;
     // The first id stays: it is the one this process's MCP server was started with.
     if (!r.sids.includes(cfg.sid)) r.sids = [r.sids[0], ...[...r.sids.slice(1), cfg.sid].slice(-19)];
+    if (releases) r.releasePending = Date.now();
     delete r.ending; changed = true;
   } else if (r && !r.sids.includes(cfg.sid)) {
     r = null; // left by an earlier process that had this pid
@@ -191,6 +195,13 @@ function hookIdentity(cfg, pid, switching) {
 }
 
 // SessionEnd for /clear or /resume: the same Claude Code goes on with another conversation.
+// Whether the previous conversation's task still has to be handed back; done() records that it has been.
+function pendingRelease(cfg, pid) {
+  const r = readProc(cfg, pid);
+  if (!r || r === UNREADABLE || !r.releasePending) return null;
+  return { done() { const x = readProc(cfg, pid); if (x && x !== UNREADABLE && x.releasePending) { delete x.releasePending; writeProc(cfg, pid, x); } } };
+}
+
 function markSwitching(cfg, pid) {
   const r = readProc(cfg, pid);
   if (r && r !== UNREADABLE) { r.ending = Date.now(); writeProc(cfg, pid, r); }
@@ -307,4 +318,4 @@ function fileHash(cfg, rel) {
   } catch { return null; }
 }
 
-module.exports = { loadConfig, post, agentCall, register, relPath, fileHash, hookIdentity, markSwitching, forgetProc, mcpIdentity, pruneProcs, claimWindow, releaseWindow };
+module.exports = { loadConfig, post, agentCall, register, relPath, fileHash, hookIdentity, pendingRelease, markSwitching, forgetProc, mcpIdentity, pruneProcs, claimWindow, releaseWindow };
