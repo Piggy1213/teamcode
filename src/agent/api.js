@@ -73,11 +73,11 @@ function post(cfg, op, args, timeoutMs = 8000) {
 // Calls an agent operation, registering the agent first if the server doesn't know it yet.
 async function agentCall(cfg, op, args = {}, timeoutMs) {
   try {
-    return await post(cfg, op, { agentId: cfg.agentId, ...args }, timeoutMs);
+    return await post(cfg, op, { agentId: cfg.agentId, ...(cfg.session ? { session: cfg.session } : {}), ...args }, timeoutMs);
   } catch (e) {
     if (e.code !== 'unknown_agent') throw e;
     await register(cfg);
-    return post(cfg, op, { agentId: cfg.agentId, ...args }, timeoutMs);
+    return post(cfg, op, { agentId: cfg.agentId, ...(cfg.session ? { session: cfg.session } : {}), ...args }, timeoutMs);
   }
 }
 

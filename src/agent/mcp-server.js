@@ -241,7 +241,12 @@ process.stdin.on('data', (chunk) => {
     handle(msg).catch(() => {});
   }
 });
-process.stdin.on('end', () => process.exit(0));
+// Claude Code quit. A connection added from the app (no task of its own) tells the team its session is over,
+// so a task it claimed goes back to the queue now rather than after the 10-minute timeout.
+process.stdin.on('end', () => {
+  if (!cfg || cfg.taskId || !registered) return process.exit(0);
+  agentCall(cfg, 'sessionEnded', {}, 3000).catch(() => {}).finally(() => process.exit(0));
+});
 
 // Register immediately and keep a heartbeat so the workspace can tell live agents from stale ones.
 if (cfg) register(cfg).then((r) => { registered = r; }).catch(() => {});

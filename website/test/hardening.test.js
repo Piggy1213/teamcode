@@ -301,7 +301,12 @@ test('a laptop back from sleep resumes its task if nobody took it; claiming anot
 
 const sha = (s) => require('crypto').createHash('sha256').update(s).digest('hex');
 const b64 = (s) => Buffer.from(s).toString('base64');
-const goOffline = (W, id) => { W.state.agents[id].lastSeen = Date.now() - 30 * 60 * 1000; W.sweep(); W.sweep(); };
+const goOffline = (W, id) => {
+  const a = W.state.agents[id];
+  a.lastSeen = Date.now() - 30 * 60 * 1000;
+  for (const k of Object.keys(a.seen || {})) a.seen[k] = a.lastSeen; // its sessions went quiet with it
+  W.sweep(); W.sweep();
+};
 
 test('history trimming keeps the version a task would Revert to and the base of an open conflict', () => {
   const c = new Coordinator({ dataDir: tmp() });
@@ -515,41 +520,76 @@ test('Revert skips files whose old version is gone for good, and still records t
 // ---- round 7 ----
 const startOn = (W, agentId, taskId, extra = {}) => { W.call('registerAgent', { agentId, name: agentId, ...extra }, user); W.call('startTask', { taskId, agentId }, user); };
 
-test('a new Claude Code session (new session id) never inherits the old session\'s task, even within minutes', () => {
+test('Claude Code sessions sharing one agent id: a live session keeps its task; a gone one loses it', () => {
   const c = new Coordinator({ dataDir: tmp() });
   const W = c.ensureWorkspace('sess-ws', { name: 'S' });
   const t = W.call('createTask', { title: 'Job' }, user);
-  startOn(W, 'agt_cc_s', t.id, { session: 's1' });
-  W.call('registerAgent', { agentId: 'agt_cc_s', name: 'agt_cc_s', session: 's1' }, user); // same process again: keeps it
+  W.call('registerAgent', { agentId: 'agt_cc_s', name: 'Uma\'s Claude Code', session: 's1' }, user);
+  W.call('startTask', { taskId: t.id, agentId: 'agt_cc_s', session: 's1' }, user);
+  W.call('registerAgent', { agentId: 'agt_cc_s', name: 'x', session: 's1' }, user); // same process again
   assert.equal(W.state.agents.agt_cc_s.taskId, t.id);
-  W.state.agents.agt_cc_s.lastSeen = Date.now() - 2 * 60 * 1000; W.sweep(); // stale, not yet offline
-  W.call('registerAgent', { agentId: 'agt_cc_s', name: 'agt_cc_s', session: 's2' }, user); // new session
+  // A second session opens while the first is still working (another terminal, `claude mcp list`...).
+  W.call('heartbeat', { agentId: 'agt_cc_s', session: 's1' }, user);
+  W.call('registerAgent', { agentId: 'agt_cc_s', name: 'x', session: 's2' }, user);
+  assert.equal(W.state.tasks[t.id].status, 'running', 'the working session keeps its task');
+  assert.equal(W.state.agents.agt_cc_s.taskId, t.id);
+  // The first session crashed (no word for two minutes); a new one registers: the task goes back to the queue.
+  W.state.agents.agt_cc_s.seen.s1 = Date.now() - 2 * 60 * 1000;
+  W.call('registerAgent', { agentId: 'agt_cc_s', name: 'x', session: 's3' }, user);
   assert.equal(W.state.tasks[t.id].status, 'ready');
   assert.equal(W.state.agents.agt_cc_s.taskId, null);
   W.call('registerAgent', { agentId: 'agt_bo', name: 'Bo' }, user);
   W.call('startTask', { taskId: t.id, agentId: 'agt_bo' }, user); // a teammate can take it
-  // Reopened within seconds (agent still active): also a new session.
+  // A session that quits cleanly gives its task back at once.
   const t2 = W.call('createTask', { title: 'Job 2' }, user);
-  W.call('startTask', { taskId: t2.id, agentId: 'agt_cc_s' }, user);
-  W.call('registerAgent', { agentId: 'agt_cc_s', name: 'agt_cc_s', session: 's3' }, user);
+  W.call('startTask', { taskId: t2.id, agentId: 'agt_cc_s', session: 's3' }, user);
+  W.call('sessionEnded', { agentId: 'agt_cc_s', session: 's3' }, user);
   assert.equal(W.state.tasks[t2.id].status, 'ready');
   c.close();
 });
 
-test('hook calls before the new session registers cannot resume a fixed-id client\'s old task', () => {
+test('a session that quits cleanly while TeamCode\'s own agent holds the task does not end that agent', () => {
+  const c = new Coordinator({ dataDir: tmp() });
+  const W = c.ensureWorkspace('sessend-ws', { name: 'E' });
+  const t = W.call('createTask', { title: 'Job' }, user);
+  startOn(W, 'agt_in', t.id, { taskId: t.id, session: 'm1' });
+  W.call('sessionEnded', { agentId: 'agt_in', session: 'm1' }, user);
+  assert.equal(W.state.tasks[t.id].status, 'running');
+  assert.equal(W.state.agents.agt_in.status, 'working');
+  c.close();
+});
+
+test('only the session that held a task gets it back after sleep; hooks and new sessions do not', () => {
   const c = new Coordinator({ dataDir: tmp() });
   const W = c.ensureWorkspace('hookfirst-ws', { name: 'H' });
   const t = W.call('createTask', { title: 'Job' }, user);
-  startOn(W, 'agt_cc_h', t.id, { session: 's1' });
+  W.call('registerAgent', { agentId: 'agt_cc_h', name: 'H', session: 's1' }, user);
+  W.call('startTask', { taskId: t.id, agentId: 'agt_cc_h', session: 's1' }, user);
   goOffline(W, 'agt_cc_h');
-  assert.equal(W.state.tasks[t.id].releasedFrom, undefined, 'a fixed-id client is never marked to resume');
-  W.call('getContext', { agentId: 'agt_cc_h' }, user); // SessionStart hook first
+  assert.equal(W.state.tasks[t.id].releasedSession, 's1');
+  W.call('getContext', { agentId: 'agt_cc_h' }, user); // a hook (no session) first
   W.call('pullDigest', { agentId: 'agt_cc_h' }, user);
   assert.equal(W.state.tasks[t.id].status, 'ready');
-  W.call('registerAgent', { agentId: 'agt_cc_h', name: 'agt_cc_h', session: 's2' }, user);
-  W.call('heartbeat', { agentId: 'agt_cc_h' }, user);
+  W.call('heartbeat', { agentId: 'agt_cc_h', session: 's1' }, user); // the same session wakes up
+  assert.equal(W.state.tasks[t.id].status, 'running', 'its session carries on with it');
+  goOffline(W, 'agt_cc_h');
+  W.call('registerAgent', { agentId: 'agt_cc_h', name: 'H', session: 's2' }, user); // a new session instead
+  W.call('heartbeat', { agentId: 'agt_cc_h', session: 's2' }, user);
   assert.equal(W.state.tasks[t.id].status, 'ready');
   assert.equal(W.state.agents.agt_cc_h.taskId, null);
+  c.close();
+});
+
+test('a dropped task takes the agent\'s blocked status with it', () => {
+  const c = new Coordinator({ dataDir: tmp() });
+  const W = c.ensureWorkspace('dropblk-ws', { name: 'D' });
+  const t = W.call('createTask', { title: 'Job' }, user);
+  W.call('registerAgent', { agentId: 'agt_cc_d', name: 'D', session: 's1' }, user);
+  W.call('startTask', { taskId: t.id, agentId: 'agt_cc_d', session: 's1' }, user);
+  W.call('reportBlocker', { agentId: 'agt_cc_d', description: 'need API', session: 's1' }, user);
+  W.call('sessionEnded', { agentId: 'agt_cc_d', session: 's1' }, user);
+  assert.equal(W.state.tasks[t.id].status, 'ready');
+  assert.notEqual(W.state.agents.agt_cc_d.status, 'blocked');
   c.close();
 });
 
@@ -597,16 +637,71 @@ test('the agent\'s own synced edit is not mistaken for someone else\'s on a late
   c.close();
 });
 
-test('a change record from before others were remembered treats trimmed history as possibly someone else\'s', () => {
-  const c = new Coordinator({ dataDir: tmp() });
-  const W = c.ensureWorkspace('legacy-ws', { name: 'L' });
-  W.call('filePut', { path: 'a.js', baseVersion: 0, contentB64: b64('original') }, user);
+test('change records saved by an older server are converted at load: gaps count as someone else, new edits by the task do not', () => {
+  const dir = tmp();
+  let c = new Coordinator({ dataDir: dir });
+  let W = c.ensureWorkspace('legacy-ws', { name: 'L' });
+  W.call('filePut', { path: 'gap.js', baseVersion: 0, contentB64: b64('original') }, user);
+  W.call('filePut', { path: 'clean.js', baseVersion: 0, contentB64: b64('original') }, user);
   const t = W.call('createTask', { title: 'Old', mode: 'shared' }, user);
   startOn(W, 'agt_l', t.id, { taskId: t.id });
-  W.call('fileEdited', { agentId: 'agt_l', path: 'a.js', hash: sha('x') }, user);
-  delete W.state.tasks[t.id].changes['a.js'].others; // as saved by an older server
-  for (let i = 0; i < 40; i++) W.call('filePut', { path: 'a.js', baseVersion: W.state.files['a.js'].version, contentB64: b64(`v${i}`) }, user);
-  assert.ok(W.call('taskChanges', { taskId: t.id }, user)[0].changedByOthersSince.some((n) => /trimmed/.test(n)));
+  W.call('fileEdited', { agentId: 'agt_l', path: 'gap.js', hash: sha('x') }, user);
+  W.call('fileEdited', { agentId: 'agt_l', path: 'clean.js', hash: sha('x') }, user);
+  for (let i = 0; i < 40; i++) W.call('filePut', { path: 'gap.js', baseVersion: W.state.files['gap.js'].version, contentB64: b64(`v${i}`) }, { user: { id: 'u2', name: 'Bo' } });
+  for (const r of Object.values(W.state.tasks[t.id].changes)) delete r.others; // as an older server saved them
+  W.saveNow(); c.close();
+  c = new Coordinator({ dataDir: dir });
+  W = c.ensureWorkspace('legacy-ws', { name: 'L' });
+  const byPath = () => Object.fromEntries(W.call('taskChanges', { taskId: t.id }, user).map((x) => [x.path, x.changedByOthersSince]));
+  assert.ok(byPath()['gap.js'].length > 0, 'trimmed history might have hidden someone else');
+  assert.deepEqual(byPath()['clean.js'], []);
+  const edit = (text) => { W.call('fileEdited', { agentId: 'agt_l', path: 'clean.js', hash: sha(text) }, user); W.call('filePut', { path: 'clean.js', baseVersion: W.state.files['clean.js'].version, contentB64: b64(text) }, user); };
+  for (let i = 0; i < 35; i++) edit(`mine ${i}`);
+  assert.deepEqual(byPath()['clean.js'], [], 'the task\'s own edits after the upgrade are not someone else\'s');
+  c.close();
+});
+
+test('a fixed-id client\'s later work counts as someone else\'s on its earlier task', () => {
+  const c = new Coordinator({ dataDir: tmp() });
+  const W = c.ensureWorkspace('later-ws', { name: 'L' });
+  W.call('filePut', { path: 'a.js', baseVersion: 0, contentB64: b64('original') }, user);
+  const t1 = W.call('createTask', { title: 'One', mode: 'shared' }, user);
+  W.call('registerAgent', { agentId: 'agt_cc_l', name: 'Uma\'s Claude Code', session: 's1' }, user);
+  W.call('startTask', { taskId: t1.id, agentId: 'agt_cc_l', session: 's1' }, user);
+  const edit = (text) => { W.call('fileEdited', { agentId: 'agt_cc_l', path: 'a.js', hash: sha(text), session: 's1' }, user); W.call('filePut', { path: 'a.js', baseVersion: W.state.files['a.js'].version, contentB64: b64(text) }, user); };
+  edit('for one');
+  W.call('completeTask', { agentId: 'agt_cc_l', taskId: t1.id, summary: 'ok' }, user);
+  const t2 = W.call('createTask', { title: 'Two', mode: 'shared' }, user);
+  W.call('startTask', { taskId: t2.id, agentId: 'agt_cc_l', session: 's1' }, user);
+  edit('for two');
+  assert.ok(W.call('taskChanges', { taskId: t1.id }, user)[0].changedByOthersSince.length > 0, 'Revert of One must not wipe Two\'s work');
+  assert.deepEqual(W.call('taskChanges', { taskId: t2.id }, user)[0].changedByOthersSince, []);
+  c.close();
+});
+
+test('a clean integration check closes every open merge record of the task, including ones from an older server', () => {
+  const c = new Coordinator({ dataDir: tmp() });
+  const W = c.ensureWorkspace('merge2-ws', { name: 'M' });
+  const t = W.call('createTask', { title: 'Branch', mode: 'isolated' }, user);
+  W.state.conflicts.c_old = { id: 'c_old', kind: 'merge', taskId: t.id, status: 'resolved', path: 'a.js', files: ['a.js'], at: 1 };
+  W.state.conflicts.c_new = { id: 'c_new', kind: 'merge', taskId: t.id, status: 'open', path: 'a.js', files: ['a.js'], at: 2 };
+  W.call('integrationChecked', { taskId: t.id, conflicts: [] }, user);
+  assert.equal(W.state.conflicts.c_new.status, 'resolved');
+  c.close();
+});
+
+test('a retried stale write is recognised even when the first attempt was credited to the agent', () => {
+  const c = new Coordinator({ dataDir: tmp() });
+  const W = c.ensureWorkspace('retry-ws', { name: 'R' });
+  W.call('filePut', { path: 'x.js', baseVersion: 0, contentB64: b64('v1') }, user);
+  W.call('filePut', { path: 'x.js', baseVersion: 1, contentB64: b64('v2') }, { user: { id: 'u2', name: 'Bo' } });
+  const t = W.call('createTask', { title: 'T', mode: 'shared' }, user);
+  startOn(W, 'agt_r', t.id, { taskId: t.id });
+  W.call('fileEdited', { agentId: 'agt_r', path: 'x.js', hash: sha('agent') }, user); // hook first: claim
+  const r1 = W.call('filePut', { path: 'x.js', baseVersion: 1, contentB64: b64('agent') }, user);
+  const r2 = W.call('filePut', { path: 'x.js', baseVersion: 1, contentB64: b64('agent') }, user);
+  assert.equal(r1.ok, false);
+  assert.equal(r1.conflict, r2.conflict);
   c.close();
 });
 

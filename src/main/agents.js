@@ -534,7 +534,9 @@ Respond with ONLY a JSON object, no prose:
 {"summary":"...","tasks":[{"title":"...","description":"...","depends_on":[],"files":["..."],"mode":"isolated","contract":""}],"risks":["..."]}`;
     return new Promise((resolve, reject) => {
       const spec = spawnSpec(settings.claudePath, findNode());
-      const args = ['-p', '--output-format', 'json', '--allowedTools', 'Read', 'Grep', 'Glob', '--max-turns', '25'];
+      // Planning is a one-off: no MCP servers or local hooks, so a teamcode connection added to this folder
+      // doesn't see it as one of the person's Claude Code sessions.
+      const args = ['-p', '--output-format', 'json', '--strict-mcp-config', '--setting-sources', 'user,project', '--allowedTools', 'Read', 'Grep', 'Glob', '--max-turns', '25'];
       if (settings.model) args.push('--model', settings.model);
       const child = spawnCli(spec, args, { cwd: this.root, windowsHide: true, shell: !!spec.shell });
       let out = '', err = '';
