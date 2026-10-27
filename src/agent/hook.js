@@ -87,6 +87,9 @@ async function main() {
       const ctx = await agentCall(cfg, 'getContext', {}, 5000);
       parts.push(`You are "${cfg.name}", one of several AI agents working on this project at the same time through TeamCode. Use the teamcode MCP tools to stay coordinated (get_context, check_files, announce_edit, publish_update, publish_contract, request_coordination).`);
       if (left?.taskId) parts.push(`Before this conversation started, you were working on the TeamCode task "${left.title}" (${left.taskId}). It has gone back to the queue. If the person wants to continue it here, call update_task_status with status "started" and task_id "${left.taskId}".`);
+      // Tasks an earlier session left (e.g. this conversation resumed with claude --continue after quitting).
+      const earlier = (ctx.tasksYouLeft || []).filter((t) => t.id !== left?.taskId);
+      if (earlier.length) parts.push(`An earlier session of yours left ${earlier.length === 1 ? 'this task' : 'these tasks'} in the queue: ${earlier.map((t) => `"${t.title}" (${t.id})`).join(', ')}. To carry on with one, call update_task_status with status "started" and its task_id.`);
       if (ctx.activeAgents?.length) parts.push('Other active agents:\n' + ctx.activeAgents.map((a) => `- ${a.name}: ${a.task || 'no task'} (${a.status})${a.editing.length ? ` editing ${a.editing.slice(0, 5).join(', ')}` : ''}`).join('\n'));
       if (ctx.decisions?.length) parts.push('Team decisions:\n' + ctx.decisions.map((d) => `- ${d.title}: ${d.decision}`).join('\n'));
       if (ctx.contracts?.length) parts.push('Published interface contracts (fetch with get_contract): ' + ctx.contracts.map((c) => `${c.name} v${c.version}`).join(', '));

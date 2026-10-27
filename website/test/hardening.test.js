@@ -536,9 +536,10 @@ test('each Claude Code session joins as its own agent; its MCP server and hooks 
   assert.equal(s1.name, "Uma's Claude Code (6faf)");
   // Older Claude Code without the variable: one agent for the folder, as before.
   assert.equal(loadConfig({ CLAUDECODE: '1' }, argv).agentId, 'agt_cc_abc');
-  // An MCP client that isn't Claude Code keeps one stable agent for the folder (a restart carries on with its task).
-  assert.equal(loadConfig({}, argv).agentId, 'agt_cc_abc');
-  assert.equal(loadConfig({}, argv).perSession, false);
+  // An MCP client that isn't Claude Code: one agent per window (the process running the server), the same on every
+  // restart of the server inside that window.
+  assert.match(loadConfig({}, argv).agentId, /^agt_cc_abc_[0-9a-f]{10}$/);
+  assert.equal(loadConfig({}, argv).agentId, loadConfig({}, argv).agentId);
   // An agent TeamCode launched keeps its own identity even though Claude Code sets the variable for it too.
   const inside = loadConfig({ CLAUDE_CODE_SESSION_ID: '6faf3834-95ae-4270-9138-35848b9b5a3a', TEAMCODE_AGENT_ID: 'agt_x', TEAMCODE_URL: 'http://h', TEAMCODE_WORKSPACE: 'w-ws', TEAMCODE_TOKEN: 't', TEAMCODE_TASK_ID: 'tsk_1' }, ['node', 'x.js']);
   assert.equal(inside.agentId, 'agt_x');
@@ -1208,9 +1209,11 @@ test('another MCP client that quits and is opened again (a new process) carries 
   await w1.tool('update_task_status', { status: 'started', task_id: X.id });
   await w1.quit(); // the client quits
   assert.equal(r.SW.state.tasks[X.id].status, 'ready');
-  const w1b = client(); // and is opened again: a new process
-  await w1b.tool('team_status', {});
-  assert.equal(r.SW.state.tasks[X.id].status, 'running', 'carries on with its task');
+  r.SW.state.agents[r.SW.state.tasks[X.id].releasedFrom].lastSeen = Date.now() - 30 * 60 * 1000; r.SW.sweep(); r.SW.sweep();
+  const w1b = client(); // and is opened again: a new process, so a new agent
+  assert.match(await w1b.tool('team_status', {}), /tasksYouLeft[\s\S]*Login page/, 'told about the task it left');
+  assert.match(await w1b.tool('update_task_status', { status: 'completed', summary: 'x' }), /not on a TeamCode task[\s\S]*Login page/, 'and reminded instead of an obscure error');
+  await w1b.tool('update_task_status', { status: 'started', task_id: X.id }); // carries on, explicitly
   assert.match(await w1b.tool('update_task_status', { status: 'completed', summary: 'login page done' }), /"status": "done"/);
   await w1b.quit();
   await r.close();
@@ -1278,7 +1281,7 @@ function clientRig(r) {
   };
 }
 
-test('two windows of another MCP client are separate agents; the folder\'s agent carries on with its task when reopened any time later', async () => {
+test('two windows of another MCP client are separate agents; a window reopened later is told what it left', async () => {
   const r = await claudeRig('client2');
   const client = clientRig(r);
   const X = r.SW.call('createTask', { title: 'Login page' }, user);
@@ -1294,28 +1297,14 @@ test('two windows of another MCP client are separate agents; the folder\'s agent
   await w2.quit();
   await w1.quit();
   // Closed for a long time: the agent went stale and offline meanwhile.
-  const folderAgent = r.SW.state.tasks[X.id].assignee;
-  r.SW.state.agents[folderAgent].lastSeen = Date.now() - 30 * 60 * 1000; r.SW.sweep(); r.SW.sweep();
+  const first = r.SW.state.tasks[X.id].assignee;
+  r.SW.state.agents[first].lastSeen = Date.now() - 30 * 60 * 1000; r.SW.sweep(); r.SW.sweep();
   const w1b = client();
-  await w1b.tool('team_status', {});
-  assert.equal(r.SW.state.tasks[X.id].status, 'running', 'carries on');
+  assert.match(await w1b.tool('team_status', {}), /Login page/);
+  assert.equal(r.SW.state.tasks[X.id].status, 'ready', 'not taken by guessing');
+  await w1b.tool('update_task_status', { status: 'started', task_id: X.id });
   assert.match(await w1b.tool('update_task_status', { status: 'completed', summary: 'login done' }), /Login page/);
   await w1b.quit();
-  await r.close();
-});
-
-test('a second window of another client that quits gives its task back and is done', async () => {
-  const r = await claudeRig('client3');
-  const client = clientRig(r);
-  const Y = r.SW.call('createTask', { title: 'Docs' }, user);
-  const w1 = client(); await w1.tool('team_status', {});
-  const w2 = client(); await w2.tool('update_task_status', { status: 'started', task_id: Y.id });
-  const second = r.SW.state.tasks[Y.id].assignee;
-  await w2.quit();
-  assert.equal(r.SW.state.tasks[Y.id].status, 'ready');
-  assert.equal(r.SW.state.tasks[Y.id].releasedFrom, undefined, 'not waiting for an agent that never returns');
-  assert.equal(r.SW.state.agents[second].status, 'done');
-  await w1.quit();
   await r.close();
 });
 
@@ -1329,6 +1318,10 @@ test('claude --continue of a closed conversation does not file its edits under t
   W.call('registerAgent', { agentId: 'agt_cc_k_1', name: 'U (aaaa)', perSession: true, baseId: 'agt_cc_k' }, user); // --continue
   W.call('fileEdited', { agentId: 'agt_cc_k_1', path: 'unrelated.md', hash: sha('x') }, user);
   assert.ok(!W.state.tasks[T.id].changes?.['unrelated.md']);
+  assert.deepEqual(W.call('getContext', { agentId: 'agt_cc_k_1' }, user).tasksYouLeft.map((t) => t.title), ['Export CSV'], 'the resumed conversation is told');
+  W.call('registerAgent', { agentId: 'agt_cc_k_2', name: 'U (bbbb)', perSession: true, baseId: 'agt_cc_k' }, user); // or a fresh session
+  assert.deepEqual(W.call('getContext', { agentId: 'agt_cc_k_2' }, user).tasksYouLeft.map((t) => t.title), ['Export CSV'], 'told it can carry on');
+  assert.throws(() => W.call('completeTask', { agentId: 'agt_cc_k_2', summary: 'x' }, user), /Export CSV/);
   c.close();
 });
 

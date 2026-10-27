@@ -532,6 +532,8 @@ class Workspace extends EventEmitter {
     this._unrelease(t);
     if (t.assignee === a.id && ['running', 'blocked'].includes(t.status)) {
       t.status = 'ready'; t.updatedAt = Date.now();
+      // A later session of the same person and folder is told it can carry on with it (see _tasksLeftFor).
+      if (a.baseId) t.leftBy = { baseId: a.baseId, agentId: a.id, name: a.name, at: Date.now() };
       this.emitEvent('task.updated', a, { task: t.id, data: { changes: { status: 'ready' }, reason } });
     }
     if (forget && a.taskId === t.id) a.taskId = null;
@@ -540,7 +542,7 @@ class Workspace extends EventEmitter {
 
   // Whatever happens to a task after the sweep released it (started, reassigned, reopened, finished...)
   // means its old agent no longer picks it back up.
-  _unrelease(t) { delete t.releasedFrom; delete t.releasedStatus; }
+  _unrelease(t) { delete t.releasedFrom; delete t.releasedStatus; delete t.leftBy; }
 
   _setAgentStatus(a, to, detail) {
     if (a.status === to && !detail) return;
@@ -619,7 +621,7 @@ class Workspace extends EventEmitter {
   }
 
   // ---------- agents ----------
-  op_registerAgent({ agentId, name, client, taskId, userId, mode, branch, cwd, perSession, baseId, carryOn }, ctx) {
+  op_registerAgent({ agentId, name, client, taskId, userId, mode, branch, cwd, perSession, baseId }, ctx) {
     let a = agentId && this.state.agents[agentId];
     // Every field an agent record keeps is bounded (new Claude Code sessions may register past the storage gate).
     name = name ? clip(name, 80) : name; client = client ? clip(client, 80) : client; cwd = cwd ? String(cwd).slice(0, 500) : cwd;
@@ -628,7 +630,6 @@ class Workspace extends EventEmitter {
       const wasInactive = !ACTIVE.has(a.status);
       Object.assign(a, { client: client || a.client, cwd: cwd || a.cwd, lastSeen: Date.now() });
       if (perSession) a.perSession = true;
-      if (carryOn) a.carryOn = true;
       // A reconnecting agent whose task has moved on to another live agent rejoins without it.
       if (taskId && taskId !== a.taskId) { try { this._assign(a, taskId); } catch (e) { if (e.code !== 'busy') throw e; } }
       const held = a.taskId && this.state.tasks[a.taskId];
@@ -636,12 +637,11 @@ class Workspace extends EventEmitter {
       // Claude Code sessions each have an agent of their own (perSession), so registering again is the same
       // session. An older Claude Code shares one id between sessions and never names a task: registering after
       // it went quiet is a new session, which starts without the old session's task (back to the queue).
-      // carryOn: another MCP client's folder agent, reopened (it carries on with the task it left when it quit).
-      if (!taskId && held && a.taskId === held.id && wasInactive && !a.perSession && !a.carryOn) this._dropTask(a, held, `${a.name} started a new session`);
+      if (!taskId && held && a.taskId === held.id && wasInactive && !a.perSession) this._dropTask(a, held, `${a.name} started a new session`);
       if (wasInactive) {
         this._setAgentStatus(a, 'working', 'reconnected');
         // A TeamCode agent names its task when it registers, so it can carry on with it.
-        if ((taskId && taskId === a.taskId) || a.carryOn) this._resumeTask(a);
+        if (taskId && taskId === a.taskId) this._resumeTask(a);
         // Requests left on the person's windows that closed meanwhile come to this one.
         if (a.baseId) for (const o of Object.values(this.state.agents)) if (o.id !== a.id && o.baseId === a.baseId && this._ended(o)) this._handOverRequests(o, a);
       }
@@ -655,7 +655,7 @@ class Workspace extends EventEmitter {
     const prev = baseId && Object.values(this.state.agents).filter((o) => o.perSession && o.baseId === baseId && Date.now() - (o.lastSeen || 0) < PRUNE_AFTER).sort((x, y) => (y.lastSeen || 0) - (x.lastSeen || 0))[0];
     a = {
       id: agentId || rid('agt'), name: name || 'Agent', baseId, client: client || 'MCP client', userId: userId || ctx.user?.id || null,
-      taskId: null, perSession: !!perSession, carryOn: !!carryOn, status: 'working', prevStatus: 'working', detail: '', mode: mode || 'shared', branch: branch || 'main',
+      taskId: null, perSession: !!perSession, status: 'working', prevStatus: 'working', detail: '', mode: mode || 'shared', branch: branch || 'main',
       cwd: cwd || null, startedAt: Date.now(), lastSeen: Date.now(), cursor: prev ? Math.min(prev.cursor || 0, this.state.seq) : this.state.seq, lastDigestAt: 0,
       reads: dict(), touched: dict(), edited: dict(), warned: dict(), updates: [], contractsSeen: dict(),
     };
@@ -733,6 +733,23 @@ class Workspace extends EventEmitter {
     const excess = Object.keys(this.state.agents).length - MAX_AGENTS + 1;
     if (done.length < excess) throw new CoordError(`This project already has ${MAX_AGENTS} agents at work.`, 'full');
     for (const a of done.slice(0, Math.max(excess, 50))) delete this.state.agents[a.id];
+  }
+
+  // Tasks an earlier session of this person and folder left in the queue (closed, crashed, or released when its
+  // server stopped and never came back), that nobody has picked up since. Sessions are told about them, so
+  // carrying on is an explicit step.
+  _tasksLeftFor(a) {
+    if (!a?.baseId) return [];
+    return Object.values(this.state.tasks).filter((t) => t.status === 'ready' && (
+      t.leftBy?.baseId === a.baseId || // including by this same agent: claude --continue of the conversation that left it
+      (t.releasedFrom && t.releasedFrom !== a.id && this.state.agents[t.releasedFrom]?.baseId === a.baseId && !ACTIVE.has(this.state.agents[t.releasedFrom].status))
+    )).map((t) => ({ id: t.id, title: t.title }));
+  }
+
+  // completeTask / failTask / requestReview / reportBlocker without a task: say what to do instead of failing obscurely.
+  _noTask(a) {
+    const left = this._tasksLeftFor(a);
+    return new CoordError(`You're not on a TeamCode task right now.${left.length ? ` Earlier you left: ${left.map((t) => `"${t.title}" (${t.id})`).join(', ')}.` : ''} Pass task_id, or start one with update_task_status "started" (see team_status).`, 'no_task');
   }
 
   // The agent that currently has a task: it is running or blocked under that agent, and the agent is
@@ -1008,6 +1025,7 @@ class Workspace extends EventEmitter {
   op_completeTask({ taskId, agentId, summary }, ctx) {
     const actor = this._actor({ agentId }, ctx);
     taskId = taskId || actor.agent?.taskId;
+    if (!taskId) throw this._noTask(actor.agent);
     const t = this._task(taskId);
     this._mustOwn(t, agentId);
     if (t.status === 'done') return t;
@@ -1021,6 +1039,7 @@ class Workspace extends EventEmitter {
 
   op_failTask({ taskId, agentId, error }, ctx) {
     const actor = this._actor({ agentId }, ctx);
+    if (!taskId && !actor.agent?.taskId) throw this._noTask(actor.agent);
     const t = this._task(taskId || actor.agent?.taskId);
     this._mustOwn(t, agentId);
     this._unrelease(t);
@@ -1453,6 +1472,7 @@ class Workspace extends EventEmitter {
       recentChangesToYourFiles: this.events.filter((e) => e.type === 'file.changed' && e.actor.id !== a?.id && e.files.some((f) => fileSet.has(f))).slice(-10).map((e) => ({ seq: e.seq, summary: e.summary, at: e.ts })),
       openConflicts: Object.values(this.state.conflicts).filter((c) => c.status === 'open' && (!a || c.agents?.includes(a.id) || fileSet.has(c.path))).map((c) => ({ id: c.id, kind: c.kind, path: c.path, message: c.message })),
       pendingReviews: Object.values(this.state.tasks).filter((x) => x.review.state === 'pending').map((x) => ({ title: x.title, branch: x.branch })),
+      tasksYouLeft: this._tasksLeftFor(a),
     };
     if (t && Object.keys(t.contractsUsed || {}).length) {
       ctx.staleContracts = Object.entries(t.contractsUsed).filter(([n, v]) => this.state.contracts[n] && this.state.contracts[n].version > v).map(([n, v]) => ({ name: n, youStartedWith: v, latest: this.state.contracts[n].version }));
@@ -1466,6 +1486,7 @@ class Workspace extends EventEmitter {
       agents: Object.values(this.state.agents).filter((o) => ACTIVE.has(o.status) || o.status === 'stale').map((o) => ({ ...this._agentView(o), you: o.id === a?.id })),
       tasks: Object.values(this.state.tasks).filter((t) => t.status !== 'cancelled').map((t) => ({ id: t.id, title: t.title, status: t.status, assignee: t.assigneeName, dependsOn: t.dependsOn, review: t.review.state })),
       unreadUpdates: a ? this._relevantSince(a, a.cursor).length : undefined,
+      tasksYouLeft: this._tasksLeftFor(a),
     };
   }
 
@@ -1500,6 +1521,7 @@ class Workspace extends EventEmitter {
 
   op_requestReview({ agentId, taskId, summary, files, headCommit, stats }, ctx) {
     const actor = this._actor({ agentId }, ctx);
+    if (!taskId && !actor.agent?.taskId) throw this._noTask(actor.agent);
     const t = this._task(taskId || actor.agent?.taskId);
     this._mustOwn(t, agentId);
     const changed = (arr(files).length ? arr(files).map(normPath) : this._taskChangedFiles(t)).slice(0, 2000).map((f) => clip(f, 500));
