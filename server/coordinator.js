@@ -72,7 +72,7 @@ const arr = (v) => (Array.isArray(v) ? v : v == null || v === '' ? [] : [v]);
 // Keyed workspace state lives in objects without a prototype, so a key like "__proto__" or "constructor"
 // (or an array that stringifies to one) is just an ordinary key: nothing can reach Object.prototype.
 const dict = (o) => { const d = Object.create(null); if (o) for (const k of Object.keys(o)) d[k] = o[k]; return d; };
-const DICT_KEYS = ['users', 'agents', 'tasks', 'files', 'reservations', 'contracts', 'blockers', 'conflicts', 'settings'];
+const DICT_KEYS = ['users', 'agents', 'tasks', 'files', 'reservations', 'contracts', 'blockers', 'conflicts', 'settings', 'handedOver'];
 // No single text field or list may be huge (file and contract content are bounded by their own limits).
 function oversized(v, key = '', depth = 0) {
   if (typeof v === 'string') return v.length > MAX_STRING && !FREE_TEXT_OK.has(key);
@@ -115,7 +115,7 @@ class Workspace extends EventEmitter {
       seq: 0,
       users: dict(), agents: dict(), tasks: dict(), files: dict(), reservations: dict(), contracts: dict(),
       decisions: [], notes: [], blockers: dict(), conflicts: dict(), coordination: [],
-      settings: dict({ testCommand: '' }),
+      settings: dict({ testCommand: '' }), handedOver: dict(), // request id -> the window it was moved to
     };
     if (dataDir) this._load();
     if (!this.events.length) this.emitEvent('workspace.created', { kind: 'system', id: 'system', name: 'TeamCode' }, { data: { name: this.state.meta.name } });
@@ -505,6 +505,8 @@ class Workspace extends EventEmitter {
       const from = a.status;
       a.status = a.prevStatus || 'working';
       this.emitEvent('agent.status_changed', a, { task: a.taskId, data: { from, to: a.status, detail: 'reconnected' } });
+      // Requests left on the person's windows that closed meanwhile come to this one, now in use.
+      if (a.baseId) for (const o of Object.values(this.state.agents)) if (o.id !== a.id && o.baseId === a.baseId && this._ended(o)) this._handOverRequests(o, a);
     }
     // Finishing, reopening or exiting never brings a task back; carrying on with the work does.
     if (RESUME_OPS.has(op)) this._resumeTask(a);
@@ -615,7 +617,7 @@ class Workspace extends EventEmitter {
   }
 
   // ---------- agents ----------
-  op_registerAgent({ agentId, name, client, taskId, userId, mode, branch, cwd, perSession, baseId }, ctx) {
+  op_registerAgent({ agentId, name, client, taskId, userId, mode, branch, cwd, perSession, baseId, takeOver }, ctx) {
     let a = agentId && this.state.agents[agentId];
     // Every field an agent record keeps is bounded (new Claude Code sessions may register past the storage gate).
     name = name ? clip(name, 80) : name; client = client ? clip(client, 80) : client; cwd = cwd ? String(cwd).slice(0, 500) : cwd;
@@ -653,34 +655,61 @@ class Workspace extends EventEmitter {
     };
     this.state.agents[a.id] = a;
     this.emitEvent('agent.joined', a, { data: { client: a.client, mode: a.mode }, branch: a.branch });
-    if (baseId) for (const o of Object.values(this.state.agents)) if (o.id !== a.id && o.baseId === baseId && this._ended(o)) this._handOverRequests(o, a);
+    if (baseId) {
+      for (const o of Object.values(this.state.agents)) {
+        if (o.id === a.id || o.baseId !== baseId || ACTIVE.has(o.status)) continue;
+        this._handOverRequests(o, a, !this._ended(o));
+      }
+    }
     if (taskId) this._assign(a, taskId);
+    // A restarted MCP client (not Claude Code: one agent per client process) carries on with the task its previous
+    // process left when it quit, if nobody has taken it since.
+    if (takeOver && baseId && !a.taskId) {
+      const left = Object.values(this.state.tasks).filter((t) => t.status === 'ready' && t.releasedFrom && t.releasedFrom !== a.id && this.state.agents[t.releasedFrom]?.baseId === baseId)
+        .sort((x, y) => (y.updatedAt || 0) - (x.updatedAt || 0))[0];
+      if (left) {
+        const prev = this.state.agents[left.releasedFrom];
+        const status = left.releasedStatus === 'blocked' ? 'blocked' : 'running';
+        this._assign(a, left.id);
+        left.status = status; left.updatedAt = Date.now();
+        this.emitEvent('task.updated', a, { task: left.id, data: { changes: { status }, reason: `${a.name} took over from ${prev?.name || 'its previous run'}` } });
+        if (prev && !this._ended(prev)) this._setAgentStatus(prev, 'done', 'restarted');
+      }
+    }
     return { agent: this._agentView(a), reconnected: false, missedCount: 0, missed: '' };
   }
 
   // A Claude Code window that was closed (not one that is asleep and may come back).
   _ended(a) { return !!a && !ACTIVE.has(a.status) && a.status !== 'stale' && a.status !== 'offline'; }
 
-  // Coordination requests addressed to a Claude Code window that closed before reading them go to another window
-  // of the same person and folder: the one in use, or the next one they open. Only those requests move; the
-  // closed window's other unread updates stay where they were.
-  _handOverRequests(from, to) {
+  // Coordination requests addressed to a Claude Code window that didn't read them go to another window of the same
+  // person and folder. From a window that closed they move (to the window in use, or the next one opened). A window
+  // that is only asleep keeps its own, and a newly opened window gets a copy (it may never wake up). Only those
+  // requests are affected; the window's other unread updates stay where they were.
+  _handOverRequests(from, to, copy = false) {
     if (!from?.baseId || !to || to.id === from.id || to.baseId !== from.baseId) return;
     for (const e of this.eventsSince(from.cursor || 0, 100000)) {
       if (e.type !== 'coordination.requested' || e.data.to !== from.id) continue;
-      const r = this.state.coordination.find((c) => c.id === e.data.id);
-      if (!r || r.to !== from.id) continue; // already handed over
-      r.to = to.id; r.toName = to.name;
+      const id = e.data.id;
+      if (this.state.handedOver[id] && this.state.handedOver[id] !== from.id) continue; // already moved on
+      if (copy && e.data.copiedTo?.includes(to.id)) continue;
+      if (!copy) {
+        this.state.handedOver[id] = to.id;
+        const r = this.state.coordination.find((c) => c.id === id);
+        if (r) { r.to = to.id; r.toName = to.name; }
+      }
       this.emitEvent('coordination.requested', e.actor, { task: e.task, files: e.files, data: { ...e.data, to: to.id, toName: to.name, handedOverFrom: from.name } });
+      if (copy) (e.data.copiedTo ||= []).push(to.id);
     }
+    const ids = Object.keys(this.state.handedOver);
+    for (const k of ids.slice(0, Math.max(0, ids.length - 5000))) delete this.state.handedOver[k];
   }
 
-  // The window a closed one's requests go to: the one in use, else one that is asleep (it gets them on waking).
+  // The window in use that a closed one's requests go to (none: they wait for the next window opened).
   _heirOf(a) {
     if (!a.baseId) return null;
     const used = (o) => o.lastActive || o.startedAt || 0;
-    const sibs = Object.values(this.state.agents).filter((o) => o.id !== a.id && o.baseId === a.baseId && !this._ended(o));
-    return sibs.filter((o) => ACTIVE.has(o.status)).sort((x, y) => used(y) - used(x))[0] || sibs.sort((x, y) => used(y) - used(x))[0] || null;
+    return Object.values(this.state.agents).filter((o) => o.id !== a.id && o.baseId === a.baseId && ACTIVE.has(o.status)).sort((x, y) => used(y) - used(x))[0] || null;
   }
 
   // Over MAX_AGENTS: forget the longest-finished agents that hold no live work. Refuse only if none can go.
@@ -1306,8 +1335,8 @@ class Workspace extends EventEmitter {
     if (e.type === 'coordination.requested') {
       if (!e.data.to) return true;
       if (e.data.to !== a.id) return false;
-      const r = this.state.coordination.find((c) => c.id === e.data.id);
-      return !r || r.to === a.id; // not handed over to another window since
+      const moved = this.state.handedOver[e.data.id];
+      return !moved || moved === a.id; // not moved to another window since
     }
     if (e.type === 'conflict.detected') return (e.data.agents || []).includes(a.id) || e.files.some((f) => a.touched[f]);
     const t = a.taskId && this.state.tasks[a.taskId];

@@ -35,7 +35,10 @@ async function main() {
   // The agent this Claude Code process runs as. A new conversation in the same process (after /clear or an
   // in-app /resume) stays that agent; `switched` is true for exactly that case.
   const pid = process.env.CLAUDE_PID;
-  const switched = cfg.perSession && hookIdentity(cfg, pid, event === 'SessionStart' && ['clear', 'resume'].includes(input.source));
+  // /branch starts a forked conversation in the same process too (source 'fork'): same agent, and it keeps its task,
+  // since the branch carries the same conversation on.
+  const switched = cfg.perSession && hookIdentity(cfg, pid, event === 'SessionStart' && ['clear', 'resume', 'fork'].includes(input.source));
+  const leftConversation = switched && input.source !== 'fork';
   // Fall back to Claude Code's cwd only when no project root was configured (env or connection file).
   if (!process.env.TEAMCODE_ROOT && !cfg.external && input.cwd) cfg.root = input.cwd;
   const tool = input.tool_name;
@@ -80,7 +83,7 @@ async function main() {
     if (event === 'SessionStart') {
       // A task the previous conversation was on isn't this one's: back to the queue (not restarted on its own), and
       // this conversation is told, in case the person wants to carry on with it here.
-      const left = switched ? await agentCall(cfg, 'releaseTask', {}, 4000).catch(() => null) : null;
+      const left = leftConversation ? await agentCall(cfg, 'releaseTask', {}, 4000).catch(() => null) : null;
       const ctx = await agentCall(cfg, 'getContext', {}, 5000);
       parts.push(`You are "${cfg.name}", one of several AI agents working on this project at the same time through TeamCode. Use the teamcode MCP tools to stay coordinated (get_context, check_files, announce_edit, publish_update, publish_contract, request_coordination).`);
       if (left?.taskId) parts.push(`Before this conversation started, you were working on the TeamCode task "${left.title}" (${left.taskId}). It has gone back to the queue. If the person wants to continue it here, call update_task_status with status "started" and task_id "${left.taskId}".`);

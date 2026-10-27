@@ -40,18 +40,22 @@ function loadConfig(env = process.env, argv = process.argv) {
   // Each Claude Code process joins as an agent of its own, so two windows in one folder never share a task or
   // each other's edits. Its id comes from the session id Claude Code gives both its MCP server and its hooks
   // (kept across /clear and /resume; see hookIdentity). Claude Code too old to give a session id keeps one agent
-  // per folder, and so does any other MCP client (restarting it keeps its agent and task). Agents TeamCode
-  // launched keep their own id.
+  // per folder. Agents TeamCode launched keep their own id.
   const eligible = !insideAgent && !env.TEAMCODE_TASK_ID && (!!file || !env.TEAMCODE_AGENT_ID);
   const sid = eligible && /^[A-Za-z0-9-]{8,100}$/.test(String(env.CLAUDE_CODE_SESSION_ID || '')) ? String(env.CLAUDE_CODE_SESSION_ID) : '';
-  const perSession = !!sid;
+  // Another MCP client (no CLAUDECODE): one agent per client process, so two of its windows stay apart; a restarted
+  // client takes over the task its previous process left (see takeOver in registerAgent).
+  const clientProcess = eligible && !sid && !env.CLAUDECODE;
+  const key = sid || (clientProcess ? `client:${process.ppid}` : '');
+  const perSession = !!key;
   const baseAgentId = agentId, baseName = name;
   if (perSession) {
-    agentId = `${agentId}_${crypto.createHash('sha1').update(sid).digest('hex').slice(0, 10)}`;
-    name = `${name} (${sid.slice(0, 4)})`;
+    const h = crypto.createHash('sha1').update(key).digest('hex');
+    agentId = `${agentId}_${h.slice(0, 10)}`;
+    name = `${name} (${(sid || h).slice(0, 4)})`;
   }
   return {
-    url, workspace, token, root, name, agentId, perSession, baseAgentId, baseName, sid,
+    url, workspace, token, root, name, agentId, perSession, baseAgentId, baseName, sid, clientProcess,
     sessionsDir: file ? path.join(path.dirname(file), 'sessions') : null,
     branch: env.TEAMCODE_BRANCH || 'main', taskId: env.TEAMCODE_TASK_ID || null,
     client: env.TEAMCODE_CLIENT || 'Claude Code', userId: env.TEAMCODE_USER_ID || null, userName: env.TEAMCODE_USER_NAME || null,
@@ -99,6 +103,7 @@ function register(cfg) {
   return post(cfg, 'registerAgent', {
     agentId: cfg.agentId, name: cfg.name, client: cfg.client, taskId: cfg.taskId, userId: cfg.userId,
     mode: cfg.mode, branch: cfg.branch, cwd: cfg.root, ...(cfg.perSession ? { perSession: true, baseId: cfg.baseAgentId } : {}),
+    ...(cfg.clientProcess ? { takeOver: true } : {}),
   });
 }
 
@@ -157,7 +162,8 @@ function hookIdentity(cfg, pid, switching) {
   // by its SessionEnd), whether the new conversation is new to this process or one it had before.
   if (r && switching && r.ending && Date.now() - r.ending < 120000) {
     switched = true;
-    if (!r.sids.includes(cfg.sid)) r.sids = [...r.sids, cfg.sid].slice(-20);
+    // The first id stays: it is the one this process's MCP server was started with.
+    if (!r.sids.includes(cfg.sid)) r.sids = [r.sids[0], ...[...r.sids.slice(1), cfg.sid].slice(-19)];
     delete r.ending; changed = true;
   } else if (r && !r.sids.includes(cfg.sid)) {
     r = null; // left by an earlier process that had this pid
@@ -217,7 +223,7 @@ function mcpIdentity(cfg) {
   if (!cfg.perSession || !cfg.sid || !cfg.sessionsDir) return null;
   for (const pid of ancestors()) {
     const r = readProc(cfg, pid);
-    if (r && r !== UNREADABLE && r.sids.includes(cfg.sid)) { touchProc(cfg, pid); return { agentId: r.agentId, name: r.name }; }
+    if (r && r !== UNREADABLE && r.sids.includes(cfg.sid)) { touchProc(cfg, pid); return { agentId: r.agentId, name: r.name, guessed: false }; }
   }
   // Not found among the ancestors (an unusual process tree): the one live window that lists this session, if
   // there is exactly one.
@@ -225,7 +231,7 @@ function mcpIdentity(cfg) {
   try { names = fs.readdirSync(cfg.sessionsDir); } catch { return null; }
   const live = names.map((n) => /^proc-(\d+)\.json$/.exec(n)).filter(Boolean)
     .map((m) => ({ pid: m[1], r: readProc(cfg, m[1]) })).filter((x) => x.r && x.r !== UNREADABLE && x.r.sids.includes(cfg.sid) && alive(x.pid));
-  return live.length === 1 ? { agentId: live[0].r.agentId, name: live[0].r.name } : null;
+  return live.length === 1 ? { agentId: live[0].r.agentId, name: live[0].r.name, guessed: true } : null;
 }
 
 // Records of Claude Code processes that are gone (crashed without SessionEnd) are cleared after a week.

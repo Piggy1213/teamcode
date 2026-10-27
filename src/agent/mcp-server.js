@@ -15,8 +15,11 @@ let identity = null;
 if (cfg?.perSession) pruneProcs(cfg);
 function settleIdentity() {
   if (!cfg?.perSession) return;
-  const id = mcpIdentity(cfg) || identity;
+  let id = mcpIdentity(cfg);
+  // A record found only by elimination never replaces one already settled through this process's own ancestry.
+  if (!id || (id.guessed && identity)) id = identity;
   if (!id) return;
+  id = { agentId: id.agentId, name: id.name };
   if (id.agentId !== cfg.agentId) registered = null; // registers again under the right id
   identity = id;
   Object.assign(cfg, id);
