@@ -8,7 +8,7 @@
 //   PostToolUse (Edit/Write/...)     -> publish file.changed; inject relevant team updates
 //   Stop                             -> don't let the agent finish while urgent team updates are unread
 // Any failure exits 0 silently so the agent is never blocked by TeamCode being unavailable.
-const { loadConfig, agentCall, post, relPath, fileHash, processIdentity } = require('./api');
+const { loadConfig, agentCall, post, relPath, fileHash, adoptIdentity, noteSwitch, takeSwitch, forgetIdentity } = require('./api');
 
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
 
@@ -31,10 +31,12 @@ async function main() {
   const cfg = loadConfig();
   // Personal hooks (from "Add to Claude Code") inside an agent TeamCode launched: its own hooks already run.
   if (cfg.insideAgent) return;
-  if (cfg.perSession) processIdentity(cfg, process.env, input); // same agent as this Claude Code's MCP server
+  const event = input.hook_event_name;
+  // A new conversation in the same Claude Code (after /clear or /resume) stays the same agent as its MCP server.
+  const switched = event === 'SessionStart' && ['clear', 'resume'].includes(input.source);
+  if (cfg.perSession) adoptIdentity(cfg, switched ? takeSwitch(cfg, process.env.CLAUDE_PID) : null);
   // Fall back to Claude Code's cwd only when no project root was configured (env or connection file).
   if (!process.env.TEAMCODE_ROOT && !cfg.external && input.cwd) cfg.root = input.cwd;
-  const event = input.hook_event_name;
   const tool = input.tool_name;
   const file = input.tool_input?.file_path || input.tool_input?.notebook_path;
 
@@ -42,7 +44,10 @@ async function main() {
   // also end a session, but the same Claude Code (and its MCP server, and its task) carries on. Only for
   // per-session agents: an older Claude Code shares one agent between sessions.
   if (event === 'SessionEnd') {
-    if (cfg.perSession && !['clear', 'resume'].includes(input.reason)) await post(cfg, 'agentExited', { agentId: cfg.agentId, outcome: 'done', detail: 'Claude Code session ended' }, 3000).catch(() => {});
+    if (!cfg.perSession) return;
+    if (['clear', 'resume'].includes(input.reason)) { noteSwitch(cfg, process.env.CLAUDE_PID); return; }
+    await post(cfg, 'agentExited', { agentId: cfg.agentId, outcome: 'done', detail: 'Claude Code session ended' }, 3000).catch(() => {});
+    forgetIdentity(cfg);
     return;
   }
 
@@ -72,8 +77,12 @@ async function main() {
   if (event === 'SessionStart' || event === 'UserPromptSubmit') {
     const parts = [];
     if (event === 'SessionStart') {
+      // A task the previous conversation was on isn't this one's: back to the queue (not restarted on its own), and
+      // this conversation is told, in case the person wants to carry on with it here.
+      const left = switched ? await agentCall(cfg, 'releaseTask', {}, 4000).catch(() => null) : null;
       const ctx = await agentCall(cfg, 'getContext', {}, 5000);
       parts.push(`You are "${cfg.name}", one of several AI agents working on this project at the same time through TeamCode. Use the teamcode MCP tools to stay coordinated (get_context, check_files, announce_edit, publish_update, publish_contract, request_coordination).`);
+      if (left?.taskId) parts.push(`Before this conversation started, you were working on the TeamCode task "${left.title}" (${left.taskId}). It has gone back to the queue. If the person wants to continue it here, call update_task_status with status "started" and task_id "${left.taskId}".`);
       if (ctx.activeAgents?.length) parts.push('Other active agents:\n' + ctx.activeAgents.map((a) => `- ${a.name}: ${a.task || 'no task'} (${a.status})${a.editing.length ? ` editing ${a.editing.slice(0, 5).join(', ')}` : ''}`).join('\n'));
       if (ctx.decisions?.length) parts.push('Team decisions:\n' + ctx.decisions.map((d) => `- ${d.title}: ${d.decision}`).join('\n'));
       if (ctx.contracts?.length) parts.push('Published interface contracts (fetch with get_contract): ' + ctx.contracts.map((c) => `${c.name} v${c.version}`).join(', '));

@@ -13,9 +13,6 @@ const path = require('path');
 const crypto = require('crypto');
 const { decodeInvite } = require('../../server/invite');
 
-// Identifies this process when it is an agent of its own (an MCP client that isn't Claude Code).
-const PROCESS_KEY = crypto.randomBytes(8).toString('hex');
-
 // True when this process runs inside an agent the TeamCode app launched (it sets these on the agent).
 const isAgentEnv = (env) => !!(env.TEAMCODE_AGENT_ID && env.TEAMCODE_URL && env.TEAMCODE_WORKSPACE && env.TEAMCODE_TOKEN);
 
@@ -40,19 +37,17 @@ function loadConfig(env = process.env, argv = process.argv) {
   let name = env.TEAMCODE_AGENT_NAME || `${os.userInfo().username}'s ${env.TEAMCODE_CLIENT || 'AI agent'}`;
   // External agents get a stable id derived from workspace + name + folder, so reconnecting resumes their event cursor.
   let agentId = env.TEAMCODE_AGENT_ID || 'agt_ext_' + crypto.createHash('sha1').update(`${workspace}|${name}|${root.toLowerCase()}`).digest('hex').slice(0, 12);
-  // Each Claude Code session joins as an agent of its own, so two sessions in one folder never share a task or
+  // Each Claude Code process joins as an agent of its own, so two windows in one folder never share a task or
   // each other's edits. Its id comes from the session id Claude Code gives both its MCP server and its hooks
-  // (after /clear the hooks find the MCP server's id instead; see processIdentity). An MCP client that isn't
-  // Claude Code has no hooks, so each of its processes is an agent. Claude Code too old to give a session id: one
-  // agent per folder, as before. Agents TeamCode launched keep their own id.
+  // (kept across /clear and /resume; see adoptIdentity). Other MCP clients, and Claude Code too old to give a
+  // session id, keep one stable agent per folder. Agents TeamCode launched keep their own id.
   const eligible = !insideAgent && !env.TEAMCODE_TASK_ID && (!!file || !env.TEAMCODE_AGENT_ID);
   const sid = eligible && /^[A-Za-z0-9-]{8,100}$/.test(String(env.CLAUDE_CODE_SESSION_ID || '')) ? String(env.CLAUDE_CODE_SESSION_ID) : '';
-  const perSession = !!sid || (eligible && !env.CLAUDECODE);
+  const perSession = !!sid;
   const baseAgentId = agentId;
   if (perSession) {
-    const key = sid || PROCESS_KEY;
-    agentId = `${agentId}_${crypto.createHash('sha1').update(key).digest('hex').slice(0, 10)}`;
-    name = `${name} (${key.slice(0, 4)})`;
+    agentId = `${agentId}_${crypto.createHash('sha1').update(sid).digest('hex').slice(0, 10)}`;
+    name = `${name} (${sid.slice(0, 4)})`;
   }
   return {
     url, workspace, token, root, name, agentId, perSession, baseAgentId, sid,
@@ -106,39 +101,81 @@ function register(cfg) {
   });
 }
 
-// /clear and an in-app /resume give a Claude Code process a new session id but keep its MCP server running. So
-// the MCP server records the agent it runs as under its parent's pid (the Claude Code process), and hooks, which
-// get that pid as CLAUDE_PID, use it. A file left by an earlier process with the same pid is ignored unless the
-// hook's session is one the file knows, or the hook marks the switch (SessionStart after clear/resume).
-function processFile(cfg, pid) {
-  return cfg.sessionsDir && /^\d+$/.test(String(pid || '')) ? path.join(cfg.sessionsDir, `${pid}.json`) : null;
+// Which agent a Claude Code process runs as. Its MCP server and hooks derive the same id from
+// CLAUDE_CODE_SESSION_ID. But /clear and an in-app /resume give the conversation a new session id while the same
+// MCP server keeps running (and a server restarted after that is given the new id). So the connection's sessions
+// folder keeps one small record per agent listing every session id it has had; whoever first sees a session
+// writes it, and everyone looks their session up there. On /clear or /resume, the SessionEnd hook leaves a note
+// for the next SessionStart hook of the same Claude Code (both get its pid as CLAUDE_PID) to carry the agent over.
+const safeName = (id) => String(id).replace(/[^A-Za-z0-9_-]/g, '');
+
+function readRecords(cfg) {
+  let names = [];
+  try { names = fs.readdirSync(cfg.sessionsDir).filter((n) => n.endsWith('.json') && !n.startsWith('switch-')); } catch { return []; }
+  const out = [];
+  for (const n of names) {
+    try {
+      const r = JSON.parse(fs.readFileSync(path.join(cfg.sessionsDir, n), 'utf8'));
+      if (typeof r?.agentId === 'string' && r.agentId.startsWith(`${cfg.baseAgentId}_`) && Array.isArray(r.sids)) out.push(r);
+    } catch { /* torn or foreign file */ }
+  }
+  return out;
 }
 
-function recordProcessIdentity(cfg, pid) {
-  const f = processFile(cfg, pid);
-  if (!f || !cfg.sid) return null;
+function saveRecord(cfg, r) {
   try {
-    fs.mkdirSync(path.dirname(f), { recursive: true, mode: 0o700 });
-    fs.writeFileSync(f, JSON.stringify({ agentId: cfg.agentId, name: cfg.name, sids: [cfg.sid], mcp: process.pid }), { mode: 0o600 });
-    return f;
+    fs.mkdirSync(cfg.sessionsDir, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(path.join(cfg.sessionsDir, `${safeName(r.agentId)}.json`), JSON.stringify(r), { mode: 0o600 });
+  } catch { /* identity still holds for this call */ }
+}
+
+// switchedFrom: the agent id the previous conversation of this Claude Code ran as (after /clear or /resume).
+function adoptIdentity(cfg, switchedFrom) {
+  if (!cfg.perSession || !cfg.sessionsDir || !cfg.sid) return cfg;
+  const records = readRecords(cfg);
+  let r = switchedFrom && records.find((x) => x.agentId === switchedFrom);
+  if (r) {
+    if (!r.sids.includes(cfg.sid)) { r.sids = [...r.sids, cfg.sid].slice(-20); saveRecord(cfg, r); }
+  } else {
+    r = records.find((x) => x.sids.includes(cfg.sid));
+    if (!r) { r = { agentId: cfg.agentId, name: cfg.name, sids: [cfg.sid] }; saveRecord(cfg, r); }
+  }
+  cfg.agentId = r.agentId;
+  if (typeof r.name === 'string') cfg.name = r.name;
+  return cfg;
+}
+
+const switchFile = (cfg, pid) => (cfg.sessionsDir && /^\d+$/.test(String(pid || '')) ? path.join(cfg.sessionsDir, `switch-${pid}.json`) : null);
+
+function noteSwitch(cfg, pid) {
+  const f = switchFile(cfg, pid);
+  if (!f) return;
+  try { fs.mkdirSync(cfg.sessionsDir, { recursive: true, mode: 0o700 }); fs.writeFileSync(f, JSON.stringify({ agentId: cfg.agentId, at: Date.now() }), { mode: 0o600 }); } catch { /* best effort */ }
+}
+
+function takeSwitch(cfg, pid) {
+  const f = switchFile(cfg, pid);
+  if (!f) return null;
+  try {
+    const s = JSON.parse(fs.readFileSync(f, 'utf8'));
+    fs.rmSync(f, { force: true });
+    return Date.now() - (s.at || 0) < 120000 && typeof s.agentId === 'string' ? s.agentId : null;
   } catch { return null; }
 }
 
-function processIdentity(cfg, env, input = {}) {
-  const f = processFile(cfg, env.CLAUDE_PID);
-  if (!f || !cfg.sid) return cfg;
-  let m;
-  try { m = JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return cfg; }
-  if (typeof m?.agentId !== 'string' || !m.agentId.startsWith(`${cfg.baseAgentId}_`) || !Array.isArray(m.sids)) return cfg;
-  if (!m.sids.includes(cfg.sid)) {
-    const switched = input.hook_event_name === 'SessionStart' && ['clear', 'resume', 'compact'].includes(input.source);
-    if (!switched) return cfg;
-    m.sids = [...m.sids, cfg.sid].slice(-20);
-    try { fs.writeFileSync(f, JSON.stringify(m), { mode: 0o600 }); } catch { /* still use it for this call */ }
-  }
-  cfg.agentId = m.agentId;
-  if (typeof m.name === 'string') cfg.name = m.name;
-  return cfg;
+function forgetIdentity(cfg) {
+  if (cfg.sessionsDir) try { fs.rmSync(path.join(cfg.sessionsDir, `${safeName(cfg.agentId)}.json`), { force: true }); } catch { /* gone */ }
+}
+
+// Records of Claude Code processes that crashed (no SessionEnd) are cleared out after a week.
+function pruneIdentities(cfg) {
+  if (!cfg.sessionsDir) return;
+  try {
+    for (const n of fs.readdirSync(cfg.sessionsDir)) {
+      const f = path.join(cfg.sessionsDir, n);
+      if (Date.now() - fs.statSync(f).mtimeMs > 7 * 24 * 3600 * 1000) fs.rmSync(f, { force: true });
+    }
+  } catch { /* no folder yet */ }
 }
 
 // Resolves symlinks in the longest existing prefix of `p`, so a file that doesn't exist yet still matches.
@@ -170,4 +207,4 @@ function fileHash(cfg, rel) {
   } catch { return null; }
 }
 
-module.exports = { loadConfig, post, agentCall, register, relPath, fileHash, recordProcessIdentity, processIdentity };
+module.exports = { loadConfig, post, agentCall, register, relPath, fileHash, adoptIdentity, noteSwitch, takeSwitch, forgetIdentity, pruneIdentities };

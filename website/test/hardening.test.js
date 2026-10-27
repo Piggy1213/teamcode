@@ -536,10 +536,9 @@ test('each Claude Code session joins as its own agent; its MCP server and hooks 
   assert.equal(s1.name, "Uma's Claude Code (6faf)");
   // Older Claude Code without the variable: one agent for the folder, as before.
   assert.equal(loadConfig({ CLAUDECODE: '1' }, argv).agentId, 'agt_cc_abc');
-  // An MCP client that isn't Claude Code (no hooks): each process is an agent of its own.
-  const solo = loadConfig({}, argv);
-  assert.equal(solo.perSession, true);
-  assert.match(solo.agentId, /^agt_cc_abc_[0-9a-f]{10}$/);
+  // An MCP client that isn't Claude Code keeps one stable agent, so restarting it keeps its task.
+  assert.equal(loadConfig({}, argv).agentId, 'agt_cc_abc');
+  assert.equal(loadConfig({}, argv).perSession, false);
   // An agent TeamCode launched keeps its own identity even though Claude Code sets the variable for it too.
   const inside = loadConfig({ CLAUDE_CODE_SESSION_ID: '6faf3834-95ae-4270-9138-35848b9b5a3a', TEAMCODE_AGENT_ID: 'agt_x', TEAMCODE_URL: 'http://h', TEAMCODE_WORKSPACE: 'w-ws', TEAMCODE_TOKEN: 't', TEAMCODE_TASK_ID: 'tsk_1' }, ['node', 'x.js']);
   assert.equal(inside.agentId, 'agt_x');
@@ -849,13 +848,14 @@ async function claudeRig(name) {
   fs.writeFileSync(conf, JSON.stringify({ TEAMCODE_URL: `http://127.0.0.1:${port}`, TEAMCODE_WORKSPACE: `${name}-ws`, TEAMCODE_TOKEN: 'tok', TEAMCODE_ROOT: proj, TEAMCODE_USER_ID: 'u1', TEAMCODE_USER_NAME: 'Uma', TEAMCODE_AGENT_NAME: "Uma's Claude Code", TEAMCODE_AGENT_ID: 'agt_cc_rig' }));
   const env = (sid, extra = {}) => { const e = { ...process.env, CLAUDECODE: '1', ...extra }; for (const k of Object.keys(e)) if (k.startsWith('TEAMCODE_') || k === 'CLAUDE_PID' || k === 'CLAUDE_CODE_SESSION_ID') delete e[k]; if (sid) e.CLAUDE_CODE_SESSION_ID = sid; Object.assign(e, extra); return e; };
   let nextId = 1;
-  const mcp = (sid) => {
-    const p = spawn(process.execPath, [path.join(ROOT, 'src/agent/mcp-server.js'), '--config', conf], { env: env(sid), stdio: ['pipe', 'pipe', 'ignore'] });
+  const mcpWithEnv = (e) => {
+    const p = spawn(process.execPath, [path.join(ROOT, 'src/agent/mcp-server.js'), '--config', conf], { env: e, stdio: ['pipe', 'pipe', 'ignore'] });
     let buf = ''; const waiting = new Map();
     p.stdout.on('data', (d) => { buf += d; let i; while ((i = buf.indexOf('\n')) >= 0) { const line = buf.slice(0, i); buf = buf.slice(i + 1); try { const m = JSON.parse(line); waiting.get(m.id)?.(m); } catch { /* not ours */ } } });
     const tool = (tname, args) => new Promise((res) => { const id = nextId++; waiting.set(id, (m) => res(m.result.content[0].text)); p.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name: tname, arguments: args } }) + '\n'); });
     return { p, tool, exited: new Promise((r) => p.on('exit', r)), quit() { p.stdin.end(); return this.exited; } };
   };
+  const mcp = (sid) => mcpWithEnv(env(sid));
   // Hooks of the Claude Code process whose child the MCP servers are (this test process).
   const hook = (sid, input) => new Promise((res) => {
     const h = spawn(process.execPath, [path.join(ROOT, 'src/agent/hook.js'), '--config', conf], { env: env(sid, { CLAUDE_PID: String(process.pid) }), stdio: ['pipe', 'pipe', 'ignore'] });
@@ -863,43 +863,77 @@ async function claudeRig(name) {
     h.on('exit', () => res(out)); h.stdin.end(JSON.stringify({ session_id: sid, cwd: proj, ...input }));
   });
   const agents = () => Object.values(SW.state.agents).filter((a) => a.id.startsWith('agt_cc_rig'));
-  return { server, SW, proj, mcp, hook, agents, close: () => server.close?.() };
+  return { server, SW, proj, mcp, mcpWithEnv, hook, agents, close: () => server.close?.() };
 }
 
-test('/clear keeps one agent: the MCP server and the hooks still agree, and the task gets the edits', async () => {
+test('/clear: same agent, the old task goes back to the queue and the new conversation is told; picking it up again records its edits', async () => {
   const r = await claudeRig('clear');
   const T = r.SW.call('createTask', { title: 'Export CSV' }, user);
+  r.SW.call('updateTask', { taskId: T.id, autoStart: true, runner: 'u1' }, user);
   const A = 'aaaaaaaa-0000-4000-8000-00000000000a', B = 'bbbbbbbb-0000-4000-8000-00000000000b';
   const m = r.mcp(A);
+  await m.tool('team_status', {});
   await r.hook(A, { hook_event_name: 'SessionStart', source: 'startup' });
   await m.tool('update_task_status', { status: 'started', task_id: T.id });
   await r.hook(A, { hook_event_name: 'SessionEnd', reason: 'clear' });
   const brief = await r.hook(B, { hook_event_name: 'SessionStart', source: 'clear' });
-  assert.match(brief, /\(aaaa\)/, 'the briefing names the same agent as the MCP server');
+  assert.match(brief, /\(aaaa\)/, 'same agent as the MCP server');
+  assert.match(brief, /Export CSV/, 'told about the task it left');
+  assert.equal(r.SW.state.tasks[T.id].status, 'ready');
+  assert.equal(r.SW.state.tasks[T.id].autoStart, false, 'not restarted by itself');
+  fs.writeFileSync(path.join(r.proj, 'readme.md'), 'other work');
+  await r.hook(B, { hook_event_name: 'PostToolUse', tool_name: 'Write', tool_input: { file_path: path.join(r.proj, 'readme.md') } });
+  assert.ok(!r.SW.state.tasks[T.id].changes?.['readme.md'], 'unrelated work after /clear is not the task\'s');
+  await m.tool('update_task_status', { status: 'started', task_id: T.id }); // the person wants to carry on
   fs.writeFileSync(path.join(r.proj, 'export.js'), 'export');
   await r.hook(B, { hook_event_name: 'PostToolUse', tool_name: 'Write', tool_input: { file_path: path.join(r.proj, 'export.js') } });
+  assert.ok(r.SW.state.tasks[T.id].changes?.['export.js']);
   assert.equal(r.agents().length, 1, 'still one agent');
-  assert.equal(r.agents()[0].status, 'working');
-  assert.ok(r.SW.state.tasks[T.id].changes?.['export.js'], 'the edit after /clear is part of the task');
-  await m.tool('request_review', { summary: 'done' }).catch(() => {});
+  // Quitting afterwards ends that agent (the SessionEnd hook finds it although the session id changed).
   await m.quit();
+  await r.hook(B, { hook_event_name: 'SessionEnd', reason: 'prompt_input_exit' });
+  assert.equal(r.agents()[0].status, 'done');
   await r.close();
 });
 
-test('quitting Claude Code without a SessionEnd hook frees its task at once; a restarted MCP server takes it back', async () => {
-  const r = await claudeRig('quit');
+test('/clear and then a restart of the MCP server: still the same agent, and it carries on with its task', async () => {
+  const r = await claudeRig('clrmcp');
   const T = r.SW.call('createTask', { title: 'Job' }, user);
-  const S = 'cccccccc-0000-4000-8000-00000000000c';
-  const m1 = r.mcp(S);
+  const A = 'aaaaaaaa-1111-4000-8000-00000000000a', B = 'bbbbbbbb-1111-4000-8000-00000000000b';
+  const m1 = r.mcp(A);
+  await m1.tool('team_status', {});
+  await r.hook(A, { hook_event_name: 'SessionEnd', reason: 'clear' });
+  await r.hook(B, { hook_event_name: 'SessionStart', source: 'clear' });
   await m1.tool('update_task_status', { status: 'started', task_id: T.id });
-  await m1.quit(); // Claude Code restarting the server, or quitting
-  assert.equal(r.SW.state.tasks[T.id].status, 'ready', 'free for others right away');
-  const m2 = r.mcp(S); // the same Claude Code's new server
+  await m1.quit(); // /mcp reconnect
+  const m2 = r.mcp(B); // Claude Code gives the new server the current session id
   await m2.tool('team_status', {});
-  assert.equal(r.SW.state.tasks[T.id].status, 'running', 'the same Claude Code carries on with it');
+  assert.equal(r.agents().length, 1);
+  assert.equal(r.SW.state.tasks[T.id].status, 'running');
+  fs.writeFileSync(path.join(r.proj, 'b.js'), 'b');
+  await r.hook(B, { hook_event_name: 'PostToolUse', tool_name: 'Write', tool_input: { file_path: path.join(r.proj, 'b.js') } });
+  assert.ok(r.SW.state.tasks[T.id].changes?.['b.js']);
+  assert.match(await m2.tool('update_task_status', { status: 'completed', summary: 'ok' }), /"status": "done"/);
   await m2.quit();
-  r.SW.call('registerAgent', { agentId: 'agt_bo', name: 'Bo' }, user);
-  r.SW.call('startTask', { taskId: T.id, agentId: 'agt_bo' }, user);
+  await r.close();
+});
+
+test('an MCP client that is not Claude Code keeps its task across a restart', async () => {
+  const r = await claudeRig('other');
+  const T = r.SW.call('createTask', { title: 'Job' }, user);
+  const spawnOther = () => {
+    const { spawn } = require('child_process');
+    const env = { ...process.env }; for (const k of Object.keys(env)) if (k.startsWith('TEAMCODE_') || k.startsWith('CLAUDE')) delete env[k];
+    return r.mcpWithEnv(env);
+  };
+  const c1 = spawnOther();
+  await c1.tool('update_task_status', { status: 'started', task_id: T.id });
+  await c1.quit();
+  const c2 = spawnOther();
+  await c2.tool('team_status', {});
+  assert.equal(r.SW.state.tasks[T.id].status, 'running');
+  assert.match(await c2.tool('update_task_status', { status: 'completed', summary: 'ok' }), /"status": "done"/);
+  await c2.quit();
   await r.close();
 });
 
@@ -929,5 +963,34 @@ test('a new Claude Code session can join a full project; finished sessions are p
   W.state.agents.agt_cc_f_1.lastSeen = Date.now() - 2 * 24 * 3600 * 1000;
   W._prunedAt = 0; W.sweep();
   assert.equal(W.state.agents.agt_cc_f_1, undefined);
+  c.close();
+});
+
+test('a request addressed to one Claude Code window stays with it; once that window has closed, the newest live one gets it', () => {
+  const c = new Coordinator({ dataDir: tmp() });
+  const W = c.ensureWorkspace('route-ws', { name: 'R' });
+  W.call('registerAgent', { agentId: 'agt_cc_q_a', name: "Uma's Claude Code (aaaa)", perSession: true, baseId: 'agt_cc_q' }, user);
+  W.call('registerAgent', { agentId: 'agt_cc_q_b', name: "Uma's Claude Code (bbbb)", perSession: true, baseId: 'agt_cc_q' }, user);
+  W.call('registerAgent', { agentId: 'agt_bob', name: 'Bob' }, user);
+  W.call('pullDigest', { agentId: 'agt_cc_q_b', force: true }, user);
+  W.call('requestCoordination', { agentId: 'agt_bob', to: "Uma's Claude Code (aaaa)", subject: 'a', message: 'window A please rename' }, user);
+  assert.ok(!(W.call('pullDigest', { agentId: 'agt_cc_q_b', force: true }, user).text || '').includes('window A please'), 'the other window is not involved');
+  W.call('agentExited', { agentId: 'agt_cc_q_a', outcome: 'done' }, user);
+  W.call('requestCoordination', { agentId: 'agt_bob', to: 'agt_cc_q_a', subject: 'b', message: 'are you there' }, user);
+  assert.ok(W.call('pullDigest', { agentId: 'agt_cc_q_b', force: true }, user).text.includes('are you there'), 'the closed window\'s request reaches the live one');
+  c.close();
+});
+
+test('a sleeping Claude Code session is kept; agent records stay small even when registered past the storage gate', () => {
+  const c = new Coordinator({ dataDir: tmp(), limits: { maxBytes: 4 * 1024 * 1024 } });
+  const W = c.ensureWorkspace('keep2-ws', { name: 'K' });
+  W.call('registerAgent', { agentId: 'agt_cc_k_1', name: 'U (1)', perSession: true, baseId: 'agt_cc_k' }, user);
+  goOffline(W, 'agt_cc_k_1');
+  W.state.agents.agt_cc_k_1.lastSeen = Date.now() - 2 * 24 * 3600 * 1000;
+  W._prunedAt = 0; W.sweep();
+  assert.ok(W.state.agents.agt_cc_k_1, 'asleep, not finished: kept');
+  const big = 'x'.repeat(60000);
+  W.call('registerAgent', { agentId: 'agt_cc_k_2', name: big, client: big, cwd: big, branch: big, mode: big, userId: big, perSession: true, baseId: 'agt_cc_k' }, user);
+  assert.ok(JSON.stringify(W.state.agents.agt_cc_k_2).length < 3000);
   c.close();
 });

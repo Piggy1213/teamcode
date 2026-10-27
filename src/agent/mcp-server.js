@@ -3,11 +3,14 @@
 // TeamCode MCP server (stdio). Lets any MCP-capable AI agent join a TeamCode workspace and coordinate:
 // discover agents, read targeted context, receive missed updates, reserve files, publish progress,
 // decisions, blockers and interface contracts, and request coordination or review.
-const { loadConfig, agentCall, post, register, relPath, fileHash, recordProcessIdentity } = require('./api');
+const { loadConfig, agentCall, post, register, relPath, fileHash, adoptIdentity, pruneIdentities } = require('./api');
 
 // A bad or missing config must not crash before the MCP handshake: report it from every tool instead.
 let cfg = null, cfgError = null;
 try { cfg = loadConfig(); } catch (e) { cfgError = e.message; }
+// The agent this Claude Code runs as (the same one its hooks use, also after /clear or a restart of this server).
+let identity = null;
+if (cfg?.perSession) { pruneIdentities(cfg); adoptIdentity(cfg); identity = { agentId: cfg.agentId, name: cfg.name }; }
 let registered = null;
 
 const S = (props, required = []) => ({ type: 'object', properties: props, required, additionalProperties: false });
@@ -203,7 +206,7 @@ async function handle(msg) {
       try {
         const next = loadConfig();
         if (cfg && next.url !== cfg.url) registered = null;
-        cfg = next; cfgError = null;
+        cfg = identity ? Object.assign(next, identity) : next; cfgError = null;
       } catch (e) { cfgError = e.message; }
     }
     if (cfgError) return send({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: `TeamCode isn't connected: ${cfgError}` }], isError: true } });
@@ -237,17 +240,19 @@ process.stdin.on('data', (chunk) => {
     handle(msg).catch(() => {});
   }
 });
-// Tell this Claude Code's hooks which agent it runs as (see processIdentity in api.js).
-const idFile = cfg?.perSession ? recordProcessIdentity(cfg, process.ppid) : null;
-
-// Claude Code is quitting, or restarting this server. A task this connection was on goes back to the queue now
-// rather than after the 10-minute timeout; if this same Claude Code comes back, it carries on with it.
-process.stdin.on('end', () => {
-  // Only our own record: a restarted server for the same Claude Code may already have written its own.
-  try { if (idFile && JSON.parse(require('fs').readFileSync(idFile, 'utf8')).mcp === process.pid) require('fs').rmSync(idFile, { force: true }); } catch { /* gone */ }
+// Claude Code is quitting, or restarting this server (it closes stdin, then may signal). A task this connection
+// was on goes back to the queue now rather than after the 10-minute timeout; if this same Claude Code comes back
+// (a restarted server is the same agent), it carries on with it.
+let ending = false;
+function end() {
+  if (ending) return;
+  ending = true;
   if (!cfg || cfg.taskId || !registered) return process.exit(0);
   post(cfg, 'releaseTask', { agentId: cfg.agentId, resumable: true }, 2000).catch(() => {}).finally(() => process.exit(0));
-});
+}
+process.stdin.on('end', end);
+process.on('SIGINT', end);
+process.on('SIGTERM', end);
 
 // Register immediately and keep a heartbeat so the workspace can tell live agents from stale ones.
 if (cfg) register(cfg).then((r) => { registered = r; }).catch(() => {});
