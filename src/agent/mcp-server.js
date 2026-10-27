@@ -3,7 +3,7 @@
 // TeamCode MCP server (stdio). Lets any MCP-capable AI agent join a TeamCode workspace and coordinate:
 // discover agents, read targeted context, receive missed updates, reserve files, publish progress,
 // decisions, blockers and interface contracts, and request coordination or review.
-const { loadConfig, agentCall, post, register, relPath, fileHash, mcpIdentity, pruneProcs } = require('./api');
+const { loadConfig, agentCall, post, register, relPath, fileHash, mcpIdentity, pruneProcs, claimClientIdentity, releaseClientIdentity } = require('./api');
 
 // A bad or missing config must not crash before the MCP handshake: report it from every tool instead.
 let cfg = null, cfgError = null;
@@ -13,6 +13,9 @@ let registered = null;
 // restarted after one), else the one derived from its session id, which its hooks derive too.
 let identity = null;
 if (cfg?.perSession) pruneProcs(cfg);
+// Another MCP client: the folder's agent, or one of its own when another window of it already is (see api.js).
+const client = cfg ? claimClientIdentity(cfg) : null;
+if (client) { identity = { agentId: client.agentId, name: client.name, carryOn: client.carryOn }; Object.assign(cfg, identity); }
 function settleIdentity() {
   if (!cfg?.perSession) return;
   let id = mcpIdentity(cfg);
@@ -260,9 +263,14 @@ let ending = false;
 function end() {
   if (ending) return;
   ending = true;
+  releaseClientIdentity(client);
   if (!cfg || cfg.taskId || !registered) return process.exit(0);
   settleIdentity();
-  post(cfg, 'releaseTask', { agentId: cfg.agentId, resumable: true }, 2000).catch(() => {}).finally(() => process.exit(0));
+  // A window of another client that ran alongside the folder's agent never comes back under its id: it is done.
+  const gone = client && !client.own;
+  post(cfg, 'releaseTask', { agentId: cfg.agentId, resumable: !gone }, 2000)
+    .then(() => (gone ? post(cfg, 'agentExited', { agentId: cfg.agentId, outcome: 'done', detail: 'closed' }, 2000) : null))
+    .catch(() => {}).finally(() => process.exit(0));
 }
 process.stdin.on('end', end);
 process.on('SIGINT', end);

@@ -1267,3 +1267,90 @@ test('each request reaches each window once: moved back to its first window, cop
   assert.equal(count('agt_cc_o_mmmm', 'weekend request'), 1);
   c.close();
 });
+
+// ---- v1.0.3 ----
+function clientRig(r) {
+  const ROOT = path.join(__dirname, '..', '..');
+  return () => {
+    const env = { ...process.env }; for (const k of Object.keys(env)) if (k.startsWith('TEAMCODE_') || k.startsWith('CLAUDE')) delete env[k];
+    const wrapper = `const c=require('child_process').spawn(process.execPath,[${JSON.stringify(path.join(ROOT, 'src/agent/mcp-server.js'))},'--config',${JSON.stringify(r.conf)}],{stdio:'inherit'});c.on('exit',(x)=>process.exit(x||0));`;
+    return r.mcpWithEnv(env, ['-e', wrapper]);
+  };
+}
+
+test('two windows of another MCP client are separate agents; the folder\'s agent carries on with its task when reopened any time later', async () => {
+  const r = await claudeRig('client2');
+  const client = clientRig(r);
+  const X = r.SW.call('createTask', { title: 'Login page' }, user);
+  const Y = r.SW.call('createTask', { title: 'Billing export' }, user);
+  const w1 = client();
+  await w1.tool('update_task_status', { status: 'started', task_id: X.id });
+  const w2 = client();
+  await w2.tool('update_task_status', { status: 'started', task_id: Y.id });
+  assert.notEqual(r.SW.state.tasks[X.id].assignee, r.SW.state.tasks[Y.id].assignee, 'separate agents');
+  assert.equal(r.SW.state.tasks[X.id].status, 'running');
+  assert.match(await w2.tool('update_task_status', { status: 'completed', summary: 'billing done' }), /Billing export/);
+  assert.equal(r.SW.state.tasks[X.id].status, 'running', 'the other window\'s task is untouched');
+  await w2.quit();
+  await w1.quit();
+  // Closed for a long time: the agent went stale and offline meanwhile.
+  const folderAgent = r.SW.state.tasks[X.id].assignee;
+  r.SW.state.agents[folderAgent].lastSeen = Date.now() - 30 * 60 * 1000; r.SW.sweep(); r.SW.sweep();
+  const w1b = client();
+  await w1b.tool('team_status', {});
+  assert.equal(r.SW.state.tasks[X.id].status, 'running', 'carries on');
+  assert.match(await w1b.tool('update_task_status', { status: 'completed', summary: 'login done' }), /Login page/);
+  await w1b.quit();
+  await r.close();
+});
+
+test('a second window of another client that quits gives its task back and is done', async () => {
+  const r = await claudeRig('client3');
+  const client = clientRig(r);
+  const Y = r.SW.call('createTask', { title: 'Docs' }, user);
+  const w1 = client(); await w1.tool('team_status', {});
+  const w2 = client(); await w2.tool('update_task_status', { status: 'started', task_id: Y.id });
+  const second = r.SW.state.tasks[Y.id].assignee;
+  await w2.quit();
+  assert.equal(r.SW.state.tasks[Y.id].status, 'ready');
+  assert.equal(r.SW.state.tasks[Y.id].releasedFrom, undefined, 'not waiting for an agent that never returns');
+  assert.equal(r.SW.state.agents[second].status, 'done');
+  await w1.quit();
+  await r.close();
+});
+
+test('claude --continue of a closed conversation does not file its edits under the task that conversation left', () => {
+  const c = new Coordinator({ dataDir: tmp() });
+  const W = c.ensureWorkspace('cont2-ws', { name: 'C' });
+  const T = W.call('createTask', { title: 'Export CSV', mode: 'shared' }, user);
+  W.call('registerAgent', { agentId: 'agt_cc_k_1', name: 'U (aaaa)', perSession: true, baseId: 'agt_cc_k' }, user);
+  W.call('startTask', { taskId: T.id, agentId: 'agt_cc_k_1' }, user);
+  W.call('agentExited', { agentId: 'agt_cc_k_1', outcome: 'done' }, user); // quit
+  W.call('registerAgent', { agentId: 'agt_cc_k_1', name: 'U (aaaa)', perSession: true, baseId: 'agt_cc_k' }, user); // --continue
+  W.call('fileEdited', { agentId: 'agt_cc_k_1', path: 'unrelated.md', hash: sha('x') }, user);
+  assert.ok(!W.state.tasks[T.id].changes?.['unrelated.md']);
+  c.close();
+});
+
+test('a copied request is not delivered again when the sleeping window closes; a reconnecting window gets closed windows\' requests', () => {
+  const c = new Coordinator({ dataDir: tmp() });
+  const W = c.ensureWorkspace('dup-ws', { name: 'D' });
+  const reg = (id) => W.call('registerAgent', { agentId: id, name: `U (${id.slice(-4)})`, perSession: true, baseId: 'agt_cc_d' }, user);
+  W.call('registerAgent', { agentId: 'agt_bob', name: 'Bob' }, user);
+  reg('agt_cc_d_zzzz');
+  W.call('requestCoordination', { agentId: 'agt_bob', to: 'agt_cc_d_zzzz', subject: 's', message: 'only once please' }, user);
+  goOffline(W, 'agt_cc_d_zzzz');
+  reg('agt_cc_d_cccc');
+  const once = (id, text = 'only once please') => (W.call('pullDigest', { agentId: id, force: true }, user).text.match(new RegExp(text, 'g')) || []).length;
+  assert.equal(once('agt_cc_d_cccc'), 1);
+  W.call('heartbeat', { agentId: 'agt_cc_d_zzzz' }, user);
+  W.call('agentExited', { agentId: 'agt_cc_d_zzzz', outcome: 'done' }, user);
+  assert.equal(once('agt_cc_d_cccc'), 0, 'not again');
+  // A window that closed with a request unread; another window reconnects by registering again.
+  W.call('requestCoordination', { agentId: 'agt_bob', to: 'agt_cc_d_cccc', subject: 's', message: 'for whoever is next' }, user);
+  reg('agt_cc_d_oooo'); W.call('agentExited', { agentId: 'agt_cc_d_oooo', outcome: 'done' }, user);
+  W.call('agentExited', { agentId: 'agt_cc_d_cccc', outcome: 'done' }, user);
+  reg('agt_cc_d_oooo'); // resumed: registers again before any heartbeat
+  assert.equal(once('agt_cc_d_oooo', 'for whoever is next'), 1);
+  c.close();
+});

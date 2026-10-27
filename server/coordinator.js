@@ -619,7 +619,7 @@ class Workspace extends EventEmitter {
   }
 
   // ---------- agents ----------
-  op_registerAgent({ agentId, name, client, taskId, userId, mode, branch, cwd, perSession, baseId }, ctx) {
+  op_registerAgent({ agentId, name, client, taskId, userId, mode, branch, cwd, perSession, baseId, carryOn }, ctx) {
     let a = agentId && this.state.agents[agentId];
     // Every field an agent record keeps is bounded (new Claude Code sessions may register past the storage gate).
     name = name ? clip(name, 80) : name; client = client ? clip(client, 80) : client; cwd = cwd ? String(cwd).slice(0, 500) : cwd;
@@ -628,6 +628,7 @@ class Workspace extends EventEmitter {
       const wasInactive = !ACTIVE.has(a.status);
       Object.assign(a, { client: client || a.client, cwd: cwd || a.cwd, lastSeen: Date.now() });
       if (perSession) a.perSession = true;
+      if (carryOn) a.carryOn = true;
       // A reconnecting agent whose task has moved on to another live agent rejoins without it.
       if (taskId && taskId !== a.taskId) { try { this._assign(a, taskId); } catch (e) { if (e.code !== 'busy') throw e; } }
       const held = a.taskId && this.state.tasks[a.taskId];
@@ -635,11 +636,14 @@ class Workspace extends EventEmitter {
       // Claude Code sessions each have an agent of their own (perSession), so registering again is the same
       // session. An older Claude Code shares one id between sessions and never names a task: registering after
       // it went quiet is a new session, which starts without the old session's task (back to the queue).
-      if (!taskId && held && a.taskId === held.id && wasInactive && !a.perSession) this._dropTask(a, held, `${a.name} started a new session`);
+      // carryOn: another MCP client's folder agent, reopened (it carries on with the task it left when it quit).
+      if (!taskId && held && a.taskId === held.id && wasInactive && !a.perSession && !a.carryOn) this._dropTask(a, held, `${a.name} started a new session`);
       if (wasInactive) {
         this._setAgentStatus(a, 'working', 'reconnected');
         // A TeamCode agent names its task when it registers, so it can carry on with it.
-        if (taskId && taskId === a.taskId) this._resumeTask(a);
+        if ((taskId && taskId === a.taskId) || a.carryOn) this._resumeTask(a);
+        // Requests left on the person's windows that closed meanwhile come to this one.
+        if (a.baseId) for (const o of Object.values(this.state.agents)) if (o.id !== a.id && o.baseId === a.baseId && this._ended(o)) this._handOverRequests(o, a);
       }
       const missed = this._relevantSince(a, a.cursor);
       return { agent: this._agentView(a), reconnected: true, missedCount: missed.length, missed: this._digestText(missed) };
@@ -651,7 +655,7 @@ class Workspace extends EventEmitter {
     const prev = baseId && Object.values(this.state.agents).filter((o) => o.perSession && o.baseId === baseId && Date.now() - (o.lastSeen || 0) < PRUNE_AFTER).sort((x, y) => (y.lastSeen || 0) - (x.lastSeen || 0))[0];
     a = {
       id: agentId || rid('agt'), name: name || 'Agent', baseId, client: client || 'MCP client', userId: userId || ctx.user?.id || null,
-      taskId: null, perSession: !!perSession, status: 'working', prevStatus: 'working', detail: '', mode: mode || 'shared', branch: branch || 'main',
+      taskId: null, perSession: !!perSession, carryOn: !!carryOn, status: 'working', prevStatus: 'working', detail: '', mode: mode || 'shared', branch: branch || 'main',
       cwd: cwd || null, startedAt: Date.now(), lastSeen: Date.now(), cursor: prev ? Math.min(prev.cursor || 0, this.state.seq) : this.state.seq, lastDigestAt: 0,
       reads: dict(), touched: dict(), edited: dict(), warned: dict(), updates: [], contractsSeen: dict(),
     };
@@ -693,6 +697,14 @@ class Workspace extends EventEmitter {
       const id = e.data.id;
       const h = this.state.handedOver[id] || { to: from.id, seq: e.seq };
       if (copy && h.copy) continue; // one copy per request
+      if (!copy && h.copy?.to === to.id) {
+        // The new window already has it as a copy: that copy becomes the request.
+        h.to = to.id; h.seq = h.copy.seq; delete h.copy;
+        const r = this.state.coordination.find((c) => c.id === id);
+        if (r) { r.to = to.id; r.toName = to.name; }
+        this.state.handedOver[id] = h;
+        continue;
+      }
       const ev = this.emitEvent('coordination.requested', e.actor, { task: e.task, files: e.files, data: { ...e.data, to: to.id, toName: to.name, handedOverFrom: from.name } });
       if (copy) h.copy = { to: to.id, seq: ev.seq };
       else {
@@ -804,7 +816,9 @@ class Workspace extends EventEmitter {
     this._releaseAll(a);
     // A task it was still on goes back to the queue rather than staying "running" under an agent that's gone.
     const t = a.taskId && this.state.tasks[a.taskId];
-    if (t && t.assignee === a.id) this._dropTask(a, t, `${a.name} stopped`, false); // the agent still shows what it worked on
+    // A TeamCode agent still shows what it worked on; a closed Claude Code window lets go of it completely (a later
+    // `claude --continue` of that conversation is the same agent and must not file its edits under it).
+    if (t && t.assignee === a.id) this._dropTask(a, t, `${a.name} stopped`, !!a.perSession);
     this._setAgentStatus(a, clip(outcome || 'done', 40), clip(detail, 300));
     this._handOverRequests(a, this._heirOf(a));
     return true;

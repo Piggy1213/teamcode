@@ -40,8 +40,8 @@ function loadConfig(env = process.env, argv = process.argv) {
   // Each Claude Code process joins as an agent of its own, so two windows in one folder never share a task or
   // each other's edits. Its id comes from the session id Claude Code gives both its MCP server and its hooks
   // (kept across /clear and /resume; see hookIdentity). Claude Code too old to give a session id keeps one agent
-  // per folder, and so does any other MCP client: it has no session id or hooks to tell its windows apart, and a
-  // stable id lets a restarted client carry on with its task. Agents TeamCode launched keep their own id.
+  // per folder. Any other MCP client has no session id or hooks: see claimClientIdentity. Agents TeamCode launched
+  // keep their own id.
   const eligible = !insideAgent && !env.TEAMCODE_TASK_ID && (!!file || !env.TEAMCODE_AGENT_ID);
   const sid = eligible && /^[A-Za-z0-9-]{8,100}$/.test(String(env.CLAUDE_CODE_SESSION_ID || '')) ? String(env.CLAUDE_CODE_SESSION_ID) : '';
   const perSession = !!sid;
@@ -52,6 +52,7 @@ function loadConfig(env = process.env, argv = process.argv) {
   }
   return {
     url, workspace, token, root, name, agentId, perSession, baseAgentId, baseName, sid,
+    otherClient: eligible && !sid && !env.CLAUDECODE,
     sessionsDir: file ? path.join(path.dirname(file), 'sessions') : null,
     branch: env.TEAMCODE_BRANCH || 'main', taskId: env.TEAMCODE_TASK_ID || null,
     client: env.TEAMCODE_CLIENT || 'Claude Code', userId: env.TEAMCODE_USER_ID || null, userName: env.TEAMCODE_USER_NAME || null,
@@ -99,6 +100,7 @@ function register(cfg) {
   return post(cfg, 'registerAgent', {
     agentId: cfg.agentId, name: cfg.name, client: cfg.client, taskId: cfg.taskId, userId: cfg.userId,
     mode: cfg.mode, branch: cfg.branch, cwd: cfg.root, ...(cfg.perSession ? { perSession: true, baseId: cfg.baseAgentId } : {}),
+    ...(cfg.carryOn ? { carryOn: true } : {}),
   });
 }
 
@@ -229,6 +231,41 @@ function mcpIdentity(cfg) {
   return live.length === 1 ? { agentId: live[0].r.agentId, name: live[0].r.name, guessed: true } : null;
 }
 
+// Another MCP client (not Claude Code) has no session id or hooks. The first of its processes running in a folder is
+// the folder's agent, so a client reopened later (any time later) carries on with that agent and its task. A second
+// process running at the same time gets an agent of its own, so two windows never share a task. The claim is a
+// small file naming the process that holds it, created exclusively so two processes starting together can't both
+// take it. Returns { agentId, name, carryOn, own } (own: this process holds the folder's id) or null.
+function claimClientIdentity(cfg) {
+  if (!cfg.otherClient) return null;
+  const folder = { agentId: cfg.baseAgentId, name: cfg.baseName, carryOn: true, own: true };
+  if (!cfg.sessionsDir) return folder;
+  const f = path.join(cfg.sessionsDir, `client-${String(cfg.baseAgentId).replace(/[^A-Za-z0-9_-]/g, '')}.json`);
+  try { fs.mkdirSync(cfg.sessionsDir, { recursive: true, mode: 0o700 }); } catch { return folder; }
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const fd = fs.openSync(f, 'wx', 0o600);
+      fs.writeSync(fd, JSON.stringify({ pid: process.pid }));
+      fs.closeSync(fd);
+      return { ...folder, file: f };
+    } catch (e) {
+      if (e.code !== 'EEXIST') return folder;
+      let holder = null;
+      try { holder = JSON.parse(fs.readFileSync(f, 'utf8')).pid; } catch { /* being written: treat as held */ holder = -1; }
+      if (holder === process.pid) return { ...folder, file: f };
+      if (holder !== -1 && !alive(holder)) { try { fs.rmSync(f, { force: true }); } catch { /* raced */ } continue; }
+      break; // held by a live process
+    }
+  }
+  const h = crypto.createHash('sha1').update(`client:${process.pid}:${crypto.randomBytes(4).toString('hex')}`).digest('hex');
+  return { agentId: `${cfg.baseAgentId}_${h.slice(0, 10)}`, name: `${cfg.baseName} (${h.slice(0, 4)})`, carryOn: false, own: false };
+}
+
+function releaseClientIdentity(id) {
+  if (!id?.file) return;
+  try { if (JSON.parse(fs.readFileSync(id.file, 'utf8')).pid === process.pid) fs.rmSync(id.file, { force: true }); } catch { /* gone */ }
+}
+
 // Records of Claude Code processes that are gone (crashed without SessionEnd) are cleared after a week.
 function pruneProcs(cfg) {
   if (!cfg.sessionsDir) return;
@@ -236,7 +273,9 @@ function pruneProcs(cfg) {
     for (const n of fs.readdirSync(cfg.sessionsDir)) {
       const f = path.join(cfg.sessionsDir, n);
       const m = /^proc-(\d+)\.json$/.exec(n);
-      if (Date.now() - fs.statSync(f).mtimeMs > 7 * 24 * 3600 * 1000 && !(m && alive(m[1]))) fs.rmSync(f, { force: true });
+      let pid = m && m[1];
+      if (!pid && n.startsWith('client-')) try { pid = JSON.parse(fs.readFileSync(f, 'utf8')).pid; } catch { /* unreadable */ }
+      if (Date.now() - fs.statSync(f).mtimeMs > 7 * 24 * 3600 * 1000 && !(pid && alive(pid))) fs.rmSync(f, { force: true });
     }
   } catch { /* no folder yet */ }
 }
@@ -270,4 +309,4 @@ function fileHash(cfg, rel) {
   } catch { return null; }
 }
 
-module.exports = { loadConfig, post, agentCall, register, relPath, fileHash, hookIdentity, markSwitching, forgetProc, mcpIdentity, pruneProcs };
+module.exports = { loadConfig, post, agentCall, register, relPath, fileHash, hookIdentity, markSwitching, forgetProc, mcpIdentity, pruneProcs, claimClientIdentity, releaseClientIdentity };
