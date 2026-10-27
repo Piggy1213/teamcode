@@ -275,6 +275,20 @@ function releaseWindow(claim) {
   try { if (JSON.parse(fs.readFileSync(claim.file, 'utf8')).pid === process.pid) fs.rmSync(claim.file, { force: true }); } catch { /* gone */ }
 }
 
+// The conversation is claiming a task through the MCP server. Claiming moves the agent off whatever it held (the
+// server puts that back in the queue and offers it back), so a hand-back still pending from /clear is settled: left
+// pending, a late retry would let go of the task just claimed.
+function claimingTask(cfg) {
+  if (!cfg.perSession || !cfg.sid || !cfg.sessionsDir) return;
+  for (const pid of ancestors()) {
+    const r = readProc(cfg, pid);
+    if (r && r !== UNREADABLE && r.sids.includes(cfg.sid)) {
+      if (r.releasePending) { delete r.releasePending; writeProc(cfg, pid, r); }
+      return;
+    }
+  }
+}
+
 // Records of Claude Code processes that are gone (crashed without SessionEnd) are cleared after a week.
 function pruneProcs(cfg) {
   if (!cfg.sessionsDir) return;
@@ -318,4 +332,4 @@ function fileHash(cfg, rel) {
   } catch { return null; }
 }
 
-module.exports = { loadConfig, post, agentCall, register, relPath, fileHash, hookIdentity, pendingRelease, markSwitching, forgetProc, mcpIdentity, pruneProcs, claimWindow, releaseWindow };
+module.exports = { loadConfig, post, agentCall, register, relPath, fileHash, hookIdentity, pendingRelease, markSwitching, forgetProc, mcpIdentity, pruneProcs, claimWindow, releaseWindow, claimingTask };

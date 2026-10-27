@@ -3,7 +3,7 @@
 // TeamCode MCP server (stdio). Lets any MCP-capable AI agent join a TeamCode workspace and coordinate:
 // discover agents, read targeted context, receive missed updates, reserve files, publish progress,
 // decisions, blockers and interface contracts, and request coordination or review.
-const { loadConfig, agentCall, post, register, relPath, fileHash, mcpIdentity, pruneProcs, claimWindow, releaseWindow } = require('./api');
+const { loadConfig, agentCall, post, register, relPath, fileHash, mcpIdentity, pruneProcs, claimWindow, releaseWindow, claimingTask } = require('./api');
 
 // A bad or missing config must not crash before the MCP handshake: report it from every tool instead.
 let cfg = null, cfgError = null;
@@ -143,7 +143,7 @@ const TOOLS = [
       if (a.status === 'failed') return agentCall(cfg, 'failTask', { error: a.summary, taskId: a.task_id });
       if (a.status === 'blocked') return agentCall(cfg, 'reportBlocker', { description: a.summary || 'Blocked', taskId: a.task_id });
       // Claim a task on the board (assigns it to this session) when one is named.
-      if (a.task_id) return agentCall(cfg, 'startTask', { taskId: a.task_id });
+      if (a.task_id) { claimingTask(cfg); return agentCall(cfg, 'startTask', { taskId: a.task_id }); }
       return agentCall(cfg, 'setAgentStatus', { status: 'working', detail: a.summary || 'started' });
     },
   },

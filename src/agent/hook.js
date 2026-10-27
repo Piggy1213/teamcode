@@ -41,7 +41,8 @@ async function main() {
   // this conversation is told, in case the person wants to carry on with it here. If TeamCode can't be reached at
   // that moment, the next hook tries again.
   let notice = '';
-  const pending = cfg.perSession && event !== 'SessionEnd' ? pendingRelease(cfg, pid) : null;
+  // Only in hooks that can tell the conversation (PreToolUse and Stop can't add context).
+  const pending = cfg.perSession && ['SessionStart', 'UserPromptSubmit', 'PostToolUse'].includes(event) ? pendingRelease(cfg, pid) : null;
   if (pending) {
     try {
       const left = await agentCall(cfg, 'releaseTask', {}, 4000);

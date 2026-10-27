@@ -1460,3 +1460,45 @@ test('a task whose "Run on" is a teammate is still offered back to whoever left 
   assert.deepEqual(W.call('getContext', { agentId: 'agt_cc_r_2' }, user).tasksYouLeft.map((t) => t.title), ['Export CSV']);
   c.close();
 });
+
+// ---- v1.0.6 ----
+test('a hand-back still pending from /clear never lets go of a task the new conversation has just claimed', async () => {
+  const r = await claudeRig('pendclaim');
+  const T = r.SW.call('createTask', { title: 'Old job' }, user);
+  const Y = r.SW.call('createTask', { title: 'New job' }, user);
+  r.SW.call('updateTask', { taskId: Y.id, autoStart: true, runner: 'u1' }, user);
+  const A = 'aaaaaaaa-dddd-4000-8000-00000000000a', B = 'bbbbbbbb-dddd-4000-8000-00000000000b';
+  const m = r.mcp(A);
+  await r.hook(A, { hook_event_name: 'SessionStart', source: 'startup' });
+  await m.tool('update_task_status', { status: 'started', task_id: T.id });
+  const good = fs.readFileSync(r.conf, 'utf8');
+  fs.writeFileSync(r.conf, good.replace(/127\.0\.0\.1:\d+/, '127.0.0.1:9'));
+  await r.hook(A, { hook_event_name: 'SessionEnd', reason: 'clear' });
+  await r.hook(B, { hook_event_name: 'SessionStart', source: 'clear' });
+  await r.hook(B, { hook_event_name: 'UserPromptSubmit' });
+  fs.writeFileSync(r.conf, good); // TeamCode is back, and the new conversation claims Y first
+  await m.tool('update_task_status', { status: 'started', task_id: Y.id });
+  const out = await r.hook(B, { hook_event_name: 'PostToolUse', tool_name: 'mcp__teamcode__update_task_status', tool_input: {} });
+  assert.equal(r.SW.state.tasks[Y.id].status, 'running', 'the task just claimed stays claimed');
+  assert.equal(r.SW.state.tasks[Y.id].autoStart, true);
+  assert.ok(!/New job[\s\S]*gone back to the queue/.test(out), 'no false notice');
+  assert.equal(r.SW.state.tasks[T.id].status, 'ready');
+  assert.deepEqual(r.SW.call('getContext', { agentId: r.SW.state.tasks[Y.id].assignee }, user).tasksYouLeft.map((t) => t.title), ['Old job'], 'the old one is offered back');
+  await m.quit();
+  await r.close();
+});
+
+test('an agent whose blocked task was taken over while it was away comes back working', () => {
+  const c = new Coordinator({ dataDir: tmp() });
+  const W = c.ensureWorkspace('blktake-ws', { name: 'B' });
+  const T = W.call('createTask', { title: 'Job' }, user);
+  W.call('registerAgent', { agentId: 'agt_cc_b_1', name: 'W1', perSession: true, baseId: 'agt_cc_b' }, user);
+  W.call('startTask', { taskId: T.id, agentId: 'agt_cc_b_1' }, user);
+  W.call('reportBlocker', { agentId: 'agt_cc_b_1', description: 'need API' }, user);
+  W.call('releaseTask', { agentId: 'agt_cc_b_1', resumable: true }, user); // its server restarts: away
+  W.call('registerAgent', { agentId: 'agt_cc_b_2', name: 'W2', perSession: true, baseId: 'agt_cc_b' }, user);
+  W.call('startTask', { taskId: T.id, agentId: 'agt_cc_b_2' }, user);
+  W.call('heartbeat', { agentId: 'agt_cc_b_1' }, user);
+  assert.equal(W.state.agents.agt_cc_b_1.status, 'working');
+  c.close();
+});

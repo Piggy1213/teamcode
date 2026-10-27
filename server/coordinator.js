@@ -780,12 +780,23 @@ class Workspace extends EventEmitter {
     if (owner && owner.id !== a.id) throw new CoordError(`${owner.name} is working on this task.`, 'busy');
     // The previous assignee no longer has this task (so a woken agent can't act on it).
     const prev = t.assignee && t.assignee !== a.id && this.state.agents[t.assignee];
-    if (prev && prev.taskId === t.id) prev.taskId = null;
+    if (prev && prev.taskId === t.id) {
+      prev.taskId = null;
+      // Its blocker was about this task: whenever it comes back, it comes back working.
+      if (prev.status === 'blocked') this._setAgentStatus(prev, 'working', 'task taken over');
+      else if (prev.prevStatus === 'blocked') prev.prevStatus = 'working';
+    }
     // An agent moving to a new task gives its old one back to the queue.
     const old = a.taskId && a.taskId !== taskId && this.state.tasks[a.taskId];
     if (old && ['running', 'blocked'].includes(old.status) && old.assignee === a.id) {
       old.status = 'ready'; old.updatedAt = Date.now();
+      this._unrelease(old);
+      if (a.baseId) old.leftBy = { baseId: a.baseId, agentId: a.id, name: a.name, at: Date.now() }; // offered back
       this.emitEvent('task.updated', a, { task: old.id, data: { changes: { status: 'ready' }, reason: `${a.name} moved to another task` } });
+    } else if (old && old.status === 'ready' && old.releasedFrom === a.id) {
+      // Waiting for this agent to come back to it, which it now won't: offered back instead.
+      this._unrelease(old);
+      if (a.baseId) old.leftBy = { baseId: a.baseId, agentId: a.id, name: a.name, at: Date.now() };
     }
     a.taskId = taskId;
     if (t.assignee !== a.id) {
