@@ -40,21 +40,18 @@ function loadConfig(env = process.env, argv = process.argv) {
   // Each Claude Code process joins as an agent of its own, so two windows in one folder never share a task or
   // each other's edits. Its id comes from the session id Claude Code gives both its MCP server and its hooks
   // (kept across /clear and /resume; see hookIdentity). Claude Code too old to give a session id keeps one agent
-  // per folder. Agents TeamCode launched keep their own id.
+  // per folder, and so does any other MCP client (restarting it keeps its agent and task). Agents TeamCode
+  // launched keep their own id.
   const eligible = !insideAgent && !env.TEAMCODE_TASK_ID && (!!file || !env.TEAMCODE_AGENT_ID);
   const sid = eligible && /^[A-Za-z0-9-]{8,100}$/.test(String(env.CLAUDE_CODE_SESSION_ID || '')) ? String(env.CLAUDE_CODE_SESSION_ID) : '';
-  // Another MCP client (no CLAUDECODE): one agent per client process, so two of its windows stay apart and a
-  // restart of the server by the same client keeps its agent.
-  const key = sid || (eligible && !env.CLAUDECODE ? `client:${process.ppid}` : '');
-  const perSession = !!key;
-  const baseAgentId = agentId;
+  const perSession = !!sid;
+  const baseAgentId = agentId, baseName = name;
   if (perSession) {
-    const h = crypto.createHash('sha1').update(key).digest('hex');
-    agentId = `${agentId}_${h.slice(0, 10)}`;
-    name = `${name} (${(sid || h).slice(0, 4)})`;
+    agentId = `${agentId}_${crypto.createHash('sha1').update(sid).digest('hex').slice(0, 10)}`;
+    name = `${name} (${sid.slice(0, 4)})`;
   }
   return {
-    url, workspace, token, root, name, agentId, perSession, baseAgentId, sid,
+    url, workspace, token, root, name, agentId, perSession, baseAgentId, baseName, sid,
     sessionsDir: file ? path.join(path.dirname(file), 'sessions') : null,
     branch: env.TEAMCODE_BRANCH || 'main', taskId: env.TEAMCODE_TASK_ID || null,
     client: env.TEAMCODE_CLIENT || 'Claude Code', userId: env.TEAMCODE_USER_ID || null, userName: env.TEAMCODE_USER_NAME || null,
@@ -112,22 +109,40 @@ function register(cfg) {
 // claude --resume or --continue has its own pid, so it never takes over another window's agent.
 const procFile = (cfg, pid) => (cfg.sessionsDir && /^\d+$/.test(String(pid || '')) ? path.join(cfg.sessionsDir, `proc-${pid}.json`) : null);
 
+// null: no record (or another connection's). UNREADABLE: there is a file, but it can't be read right now; it
+// must never be mistaken for "no record" and replaced (records are replaced atomically, so this is rare).
+const UNREADABLE = Symbol('unreadable');
 function readProc(cfg, pid) {
   const f = procFile(cfg, pid);
   if (!f) return null;
-  try {
-    const r = JSON.parse(fs.readFileSync(f, 'utf8'));
-    return typeof r?.agentId === 'string' && r.agentId.startsWith(`${cfg.baseAgentId}_`) && Array.isArray(r.sids) ? r : null;
-  } catch { return null; }
+  for (let i = 0; ; i++) {
+    try {
+      const r = JSON.parse(fs.readFileSync(f, 'utf8'));
+      return typeof r?.agentId === 'string' && r.agentId.startsWith(`${cfg.baseAgentId}_`) && Array.isArray(r.sids) ? r : null;
+    } catch (e) {
+      if (e.code === 'ENOENT') return null;
+      if (i >= 4) return UNREADABLE;
+      const until = Date.now() + 15; while (Date.now() < until) { /* brief wait for a writer */ }
+    }
+  }
 }
 
+// Written to a temporary file and renamed into place, so a reader never sees half a record.
 function writeProc(cfg, pid, r) {
   const f = procFile(cfg, pid);
   if (!f) return;
   try {
     fs.mkdirSync(cfg.sessionsDir, { recursive: true, mode: 0o700 });
-    fs.writeFileSync(f, JSON.stringify(r), { mode: 0o600 }); // also keeps a live record from looking abandoned
+    const tmp = `${f}.${process.pid}.${crypto.randomBytes(3).toString('hex')}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(r), { mode: 0o600 });
+    fs.renameSync(tmp, f);
   } catch { /* identity still holds for this call */ }
+}
+
+// Keeps a live record from looking abandoned without rewriting it.
+function touchProc(cfg, pid) {
+  const f = procFile(cfg, pid);
+  if (f) try { const now = new Date(); fs.utimesSync(f, now, now); } catch { /* gone */ }
 }
 
 const alive = (pid) => { try { process.kill(Number(pid), 0); return true; } catch (e) { return e.code === 'EPERM'; } };
@@ -136,24 +151,35 @@ const alive = (pid) => { try { process.kill(Number(pid), 0); return true; } catc
 // inside the same Claude Code (the caller then lets go of the previous conversation's task).
 function hookIdentity(cfg, pid, switching) {
   if (!cfg.perSession || !cfg.sid || !procFile(cfg, pid)) return false;
-  let r = readProc(cfg, pid), switched = false;
-  if (r && !r.sids.includes(cfg.sid)) {
-    if (switching && r.ending && Date.now() - r.ending < 120000) { r.sids = [...r.sids, cfg.sid].slice(-20); switched = true; }
-    else r = null; // left by an earlier process that had this pid
+  let r = readProc(cfg, pid), switched = false, changed = false;
+  if (r === UNREADABLE) return false; // derived id for this call; the record is left alone
+  // A conversation change inside this process: the previous conversation ended with /clear or /resume (marked
+  // by its SessionEnd), whether the new conversation is new to this process or one it had before.
+  if (r && switching && r.ending && Date.now() - r.ending < 120000) {
+    switched = true;
+    if (!r.sids.includes(cfg.sid)) r.sids = [...r.sids, cfg.sid].slice(-20);
+    delete r.ending; changed = true;
+  } else if (r && !r.sids.includes(cfg.sid)) {
+    r = null; // left by an earlier process that had this pid
   }
   if (!r) {
     // Normally the id the MCP server derives from the same session id. If another live window already is that
-    // agent (this process resumed its conversation), this one gets an id of its own.
-    let agentId = cfg.agentId;
+    // agent (this process resumed its conversation), this one gets an id and name of its own.
+    let agentId = cfg.agentId, name = cfg.name;
     const taken = fs.existsSync(cfg.sessionsDir) && fs.readdirSync(cfg.sessionsDir).some((n) => {
       const m = /^proc-(\d+)\.json$/.exec(n);
-      return m && m[1] !== String(pid) && readProc(cfg, m[1])?.agentId === agentId && alive(m[1]);
+      const o = m && m[1] !== String(pid) && readProc(cfg, m[1]);
+      return o && o !== UNREADABLE && o.agentId === agentId && alive(m[1]);
     });
-    if (taken) agentId = `${cfg.baseAgentId}_${crypto.createHash('sha1').update(`${cfg.sid}:${pid}`).digest('hex').slice(0, 10)}`;
-    r = { pid: Number(pid), agentId, name: cfg.name, sids: [cfg.sid] };
+    if (taken) {
+      const h = crypto.createHash('sha1').update(`${cfg.sid}:${pid}`).digest('hex');
+      agentId = `${cfg.baseAgentId}_${h.slice(0, 10)}`;
+      name = `${cfg.baseName} (${h.slice(0, 4)})`;
+    }
+    r = { pid: Number(pid), agentId, name, sids: [cfg.sid] };
+    changed = true;
   }
-  delete r.ending;
-  writeProc(cfg, pid, r);
+  if (changed) writeProc(cfg, pid, r); else touchProc(cfg, pid);
   cfg.agentId = r.agentId;
   if (typeof r.name === 'string') cfg.name = r.name;
   return switched;
@@ -162,7 +188,7 @@ function hookIdentity(cfg, pid, switching) {
 // SessionEnd for /clear or /resume: the same Claude Code goes on with another conversation.
 function markSwitching(cfg, pid) {
   const r = readProc(cfg, pid);
-  if (r) { r.ending = Date.now(); writeProc(cfg, pid, r); }
+  if (r && r !== UNREADABLE) { r.ending = Date.now(); writeProc(cfg, pid, r); }
 }
 
 function forgetProc(cfg, pid) {
@@ -175,14 +201,14 @@ let ancestorCache = null;
 function ancestors() {
   if (ancestorCache) return ancestorCache;
   const chain = [process.ppid];
-  if (process.platform !== 'win32') {
-    try {
-      const { execFileSync } = require('child_process');
-      const parent = new Map(execFileSync('ps', ['-A', '-o', 'pid=,ppid='], { encoding: 'utf8', timeout: 3000 }).trim().split('\n')
-        .map((l) => l.trim().split(/\s+/).map(Number)).filter((x) => x.length === 2));
-      for (let i = 0; i < 4; i++) { const up = parent.get(chain[chain.length - 1]); if (!up || up <= 1) break; chain.push(up); }
-    } catch { /* ps unavailable: parent only */ }
-  }
+  try {
+    const { execFileSync } = require('child_process');
+    const out = process.platform === 'win32'
+      ? execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', 'Get-CimInstance Win32_Process | ForEach-Object { "$($_.ProcessId) $($_.ParentProcessId)" }'], { encoding: 'utf8', timeout: 8000, windowsHide: true })
+      : execFileSync('ps', ['-A', '-o', 'pid=,ppid='], { encoding: 'utf8', timeout: 3000 });
+    const parent = new Map(out.trim().split(/\r?\n/).map((l) => l.trim().split(/\s+/).map(Number)).filter((x) => x.length === 2));
+    for (let i = 0; i < 4; i++) { const up = parent.get(chain[chain.length - 1]); if (!up || up <= 1) break; chain.push(up); }
+  } catch { /* no process list: parent only */ }
   return (ancestorCache = chain);
 }
 
@@ -191,12 +217,15 @@ function mcpIdentity(cfg) {
   if (!cfg.perSession || !cfg.sid || !cfg.sessionsDir) return null;
   for (const pid of ancestors()) {
     const r = readProc(cfg, pid);
-    if (r && r.sids.includes(cfg.sid)) {
-      try { const now = new Date(); fs.utimesSync(procFile(cfg, pid), now, now); } catch { /* best effort */ }
-      return { agentId: r.agentId, name: r.name };
-    }
+    if (r && r !== UNREADABLE && r.sids.includes(cfg.sid)) { touchProc(cfg, pid); return { agentId: r.agentId, name: r.name }; }
   }
-  return null;
+  // Not found among the ancestors (an unusual process tree): the one live window that lists this session, if
+  // there is exactly one.
+  let names = [];
+  try { names = fs.readdirSync(cfg.sessionsDir); } catch { return null; }
+  const live = names.map((n) => /^proc-(\d+)\.json$/.exec(n)).filter(Boolean)
+    .map((m) => ({ pid: m[1], r: readProc(cfg, m[1]) })).filter((x) => x.r && x.r !== UNREADABLE && x.r.sids.includes(cfg.sid) && alive(x.pid));
+  return live.length === 1 ? { agentId: live[0].r.agentId, name: live[0].r.name } : null;
 }
 
 // Records of Claude Code processes that are gone (crashed without SessionEnd) are cleared after a week.

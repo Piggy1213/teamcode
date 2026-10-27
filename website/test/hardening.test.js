@@ -536,9 +536,9 @@ test('each Claude Code session joins as its own agent; its MCP server and hooks 
   assert.equal(s1.name, "Uma's Claude Code (6faf)");
   // Older Claude Code without the variable: one agent for the folder, as before.
   assert.equal(loadConfig({ CLAUDECODE: '1' }, argv).agentId, 'agt_cc_abc');
-  // An MCP client that isn't Claude Code: one agent per client process, the same on every (re)start under it.
-  assert.match(loadConfig({}, argv).agentId, /^agt_cc_abc_[0-9a-f]{10}$/);
-  assert.equal(loadConfig({}, argv).agentId, loadConfig({}, argv).agentId);
+  // An MCP client that isn't Claude Code keeps one stable agent for the folder, so restarting it keeps its task.
+  assert.equal(loadConfig({}, argv).agentId, 'agt_cc_abc');
+  assert.equal(loadConfig({}, argv).perSession, false);
   // An agent TeamCode launched keeps its own identity even though Claude Code sets the variable for it too.
   const inside = loadConfig({ CLAUDE_CODE_SESSION_ID: '6faf3834-95ae-4270-9138-35848b9b5a3a', TEAMCODE_AGENT_ID: 'agt_x', TEAMCODE_URL: 'http://h', TEAMCODE_WORKSPACE: 'w-ws', TEAMCODE_TOKEN: 't', TEAMCODE_TASK_ID: 'tsk_1' }, ['node', 'x.js']);
   assert.equal(inside.agentId, 'agt_x');
@@ -1085,5 +1085,76 @@ test('a request sent to a window that closes unread goes to the window in use, o
   W.call('agentExited', { agentId: 'agt_cc_h_b', outcome: 'done' }, user);
   W.call('registerAgent', { agentId: 'agt_cc_h_c', name: "Uma's Claude Code (cccc)", perSession: true, baseId: 'agt_cc_h' }, user);
   assert.ok(W.call('pullDigest', { agentId: 'agt_cc_h_c', force: true }, user).text.includes('ping second'));
+  c.close();
+});
+
+// ---- round 13 ----
+test('parallel hooks after /clear never tear the identity record', async () => {
+  const r = await claudeRig('torn');
+  const A = 'aaaaaaaa-5555-4000-8000-00000000000a', B = 'bbbbbbbb-5555-4000-8000-00000000000b';
+  await r.hook(A, { hook_event_name: 'SessionStart', source: 'startup' });
+  await r.hook(A, { hook_event_name: 'SessionEnd', reason: 'clear' });
+  await r.hook(B, { hook_event_name: 'SessionStart', source: 'clear' });
+  const rec = () => JSON.parse(fs.readFileSync(path.join(path.dirname(r.conf), 'sessions', `proc-${process.pid}.json`), 'utf8'));
+  const id = rec().agentId;
+  fs.writeFileSync(path.join(r.proj, 'f.js'), 'x');
+  for (let batch = 0; batch < 15; batch++) {
+    await Promise.all(Array.from({ length: 5 }, () => r.hook(B, { hook_event_name: 'PostToolUse', tool_name: 'Read', tool_input: { file_path: path.join(r.proj, 'f.js') } })));
+  }
+  assert.equal(rec().agentId, id, 'still the same agent');
+  assert.equal(r.agents().length, 1);
+  await r.close();
+});
+
+test('/resume back to an earlier conversation of the same window also lets go of the current task', async () => {
+  const r = await claudeRig('resback');
+  const A = 'aaaaaaaa-6666-4000-8000-00000000000a', B = 'bbbbbbbb-6666-4000-8000-00000000000b';
+  await r.hook(A, { hook_event_name: 'SessionStart', source: 'startup' });
+  await r.hook(A, { hook_event_name: 'SessionEnd', reason: 'clear' });
+  await r.hook(B, { hook_event_name: 'SessionStart', source: 'clear' });
+  const agentId = r.agents()[0].id;
+  const T2 = r.SW.call('createTask', { title: 'Second job' }, user);
+  r.SW.call('startTask', { taskId: T2.id, agentId }, user);
+  await r.hook(B, { hook_event_name: 'SessionEnd', reason: 'resume' });
+  const brief = await r.hook(A, { hook_event_name: 'SessionStart', source: 'resume' });
+  assert.match(brief, /Second job/);
+  assert.equal(r.SW.state.tasks[T2.id].status, 'ready');
+  fs.writeFileSync(path.join(r.proj, 'x.js'), 'x');
+  await r.hook(A, { hook_event_name: 'PostToolUse', tool_name: 'Write', tool_input: { file_path: path.join(r.proj, 'x.js') } });
+  assert.ok(!r.SW.state.tasks[T2.id].changes?.['x.js']);
+  await r.close();
+});
+
+test('claude --continue on a live window\'s conversation gets a name of its own', async () => {
+  const r = await claudeRig('cname');
+  const X = 'eeeeeeee-7777-4000-8000-00000000000e';
+  await r.hook(X, { hook_event_name: 'SessionStart', source: 'startup' }); // window 1 is this live process
+  await r.hook(X, { hook_event_name: 'SessionStart', source: 'resume' }, 44444);
+  const names = r.agents().map((a) => a.name);
+  assert.equal(new Set(names).size, 2, names.join(' / '));
+  await r.close();
+});
+
+test('a sleeping window keeps its unread updates and its requests; a closed window\'s requests wait for a sleeping sibling', () => {
+  const c = new Coordinator({ dataDir: tmp() });
+  const W = c.ensureWorkspace('sleep2-ws', { name: 'S' });
+  W.call('registerAgent', { agentId: 'agt_cc_s_a', name: "Uma's Claude Code (aaaa)", perSession: true, baseId: 'agt_cc_s' }, user);
+  W.call('registerAgent', { agentId: 'agt_cc_s_b', name: "Uma's Claude Code (bbbb)", perSession: true, baseId: 'agt_cc_s' }, user);
+  W.call('registerAgent', { agentId: 'agt_bob', name: 'Bob' }, user);
+  W.call('pullDigest', { agentId: 'agt_cc_s_a', force: true }, user);
+  W.call('recordDecision', { agentId: 'agt_bob', title: 'IDs', decision: 'Use UUIDv7 everywhere' }, user);
+  goOffline(W, 'agt_cc_s_a'); // A's laptop sleeps while B is in use
+  W.call('heartbeat', { agentId: 'agt_cc_s_b' }, user);
+  W.call('requestCoordination', { agentId: 'agt_bob', to: 'agt_cc_s_a', subject: 's', message: 'hold off on api.ts' }, user);
+  W.call('heartbeat', { agentId: 'agt_cc_s_a' }, user); // A wakes
+  const d = W.call('pullDigest', { agentId: 'agt_cc_s_a', force: true }, user).text;
+  assert.ok(d.includes('UUIDv7'), 'its unread updates are still there');
+  assert.ok(d.includes('hold off on api.ts'), 'the request addressed to it stayed with it');
+  // A closes; B is asleep: a request to A waits for B.
+  W.call('agentExited', { agentId: 'agt_cc_s_a', outcome: 'done' }, user);
+  goOffline(W, 'agt_cc_s_b');
+  W.call('requestCoordination', { agentId: 'agt_bob', to: "Uma's Claude Code (aaaa)", subject: 's', message: 'are you around' }, user);
+  W.call('heartbeat', { agentId: 'agt_cc_s_b' }, user);
+  assert.ok(W.call('pullDigest', { agentId: 'agt_cc_s_b', force: true }, user).text.includes('are you around'));
   c.close();
 });
